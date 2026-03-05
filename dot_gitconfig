@@ -1,0 +1,7 @@
+[user]
+	email = filipelqj@gmail.com
+	name = filipejunqueira
+[credential]
+	helper = cache --timeout=28800
+[init]
+	defaultBranch = main

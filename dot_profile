@@ -1,0 +1,2 @@
+export SSH_ASKPASS="/usr/lib/seahorse/ssh-askpass"
+export SSH_ASKPASS_REQUIRE="prefer"

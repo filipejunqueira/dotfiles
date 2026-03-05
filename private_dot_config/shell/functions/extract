@@ -1,0 +1,19 @@
+#autoload
+# extract <archive>… : smart extractor for common formats
+function extract () {
+  (( $# == 0 )) && { echo "Usage: extract <archive>…"; return 1; }
+
+  for file in "$@"; do
+    [[ ! -f $file ]] && { echo "extract: '$file' not found"; continue; }
+    case $file in
+      *.tar.bz2|*.tbz2)  tar xvjf "$file" ;;
+      *.tar.gz|*.tgz)    tar xvzf "$file" ;;
+      *.tar.xz|*.txz)    tar xvJf "$file" ;;
+      *.tar)             tar xvf  "$file" ;;
+      *.zip)             unzip    "$file" ;;
+      *.rar)             unrar x  "$file" ;;
+      *.7z)              7z x     "$file" ;;
+      *)                 echo "extract: '$file' – unknown format" ;;
+    esac
+  done
+}

@@ -1,0 +1,7 @@
+#autoload
+# mkcd <dir> : create directory (with -p) and cd into it
+function mkcd () {
+  local dir=$1
+  [[ -z $dir ]] && { echo "Usage: mkcd <directory>"; return 1; }
+  mkdir -pv -- "$dir" && cd -- "$dir"
+}

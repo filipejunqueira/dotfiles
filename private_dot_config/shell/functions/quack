@@ -1,0 +1,10 @@
+#autoload
+# quack : plays a quack sound. Also hooks command_not_found_handle
+# so typos produce a quack instead of silence.
+command_not_found_handle() {
+  (paplay ~/.local/share/sounds/meme-sounds/bell.ogg &) 2>/dev/null
+  echo "bash: $1: command not found"
+  return 127
+}
+
+quack() { (paplay ~/.local/share/sounds/meme-sounds/bell.ogg &) 2>/dev/null; }

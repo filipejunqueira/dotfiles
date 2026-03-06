@@ -7,3 +7,4 @@
 ######################################################################
 
 command -v zoxide > /dev/null 2>&1 && eval "$(zoxide init zsh)"
+unalias zi 2>/dev/null  # zinit also defines zi — zoxide's picker takes priority

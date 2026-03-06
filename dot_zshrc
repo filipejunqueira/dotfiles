@@ -19,6 +19,8 @@ source "$SHELL_CONFIG/plugins/zinit.sh"  # loads plugins, sets fpath, autoloads 
 # ── Completion (after zinit has extended fpath) ────────────────────
 source "$SHELL_CONFIG/completion.sh"     # compinit lives here — called once
 
+zinit cdreplay -q          # replay compdef calls after compinit
+
 # ── Tool initialisations ───────────────────────────────────────────
 source "$SHELL_CONFIG/plugins/fzf.sh"
 source "$SHELL_CONFIG/plugins/zoxide.sh"

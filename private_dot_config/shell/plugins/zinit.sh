@@ -32,4 +32,3 @@ zinit snippet OMZP::archlinux
 zinit snippet OMZP::command-not-found
 
 # ── Rebuild compdefs after plugin load ────────────────────────────
-zinit cdreplay -q

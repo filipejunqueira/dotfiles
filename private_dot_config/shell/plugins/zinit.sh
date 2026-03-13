@@ -31,4 +31,7 @@ zinit snippet OMZP::sudo
 zinit snippet OMZP::archlinux
 zinit snippet OMZP::command-not-found
 
+# ── Style overrides ────────────────────────────────────────────────
+ZSH_HIGHLIGHT_STYLES[comment]='fg=#a89984,bold'
+
 # ── Rebuild compdefs after plugin load ────────────────────────────

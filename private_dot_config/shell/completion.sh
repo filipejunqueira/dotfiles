@@ -8,4 +8,4 @@ zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
 zstyle ':completion:*' rehash true
 zstyle ':completion:*' menu select
 
-autoload -Uz compinit && compinit
+autoload -Uz compinit && compinit -d "$XDG_CACHE_HOME/zsh/zcompdump-$ZSH_VERSION"

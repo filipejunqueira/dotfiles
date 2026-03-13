@@ -11,6 +11,14 @@ export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_STATE_HOME="$HOME/.local/state"   # was missing from original
+# ── XDG overrides (Phase 9) ────────────────────────────────────────
+export HISTFILE="${XDG_STATE_HOME}/bash/history"
+export GNUPGHOME="$XDG_DATA_HOME/gnupg"
+export PASSWORD_STORE_DIR="$XDG_DATA_HOME/pass"
+export PYTHONSTARTUP="$XDG_CONFIG_HOME/python/pythonrc"
+export INPUTRC="$XDG_CONFIG_HOME/readline/inputrc"
+export CUDA_CACHE_PATH="$XDG_CACHE_HOME/nv"
+export TEXMFVAR="$XDG_CACHE_HOME/texlive/texmf-var"
 
 # ── Default applications ───────────────────────────────────────────
 export EDITOR="nvim"

@@ -17,3 +17,4 @@ setopt histignorealldups          # Drop older duplicate commands
 setopt autocd                     # Typing a dir name == cd into it
 setopt inc_append_history         # Write history immediately
 setopt histignorespace            # Cmds starting with space not saved
+setopt interactivecomments        # Allows for # while on the terminal (not inside a script file)

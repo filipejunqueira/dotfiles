@@ -12,3 +12,6 @@ bindkey '^[[A' history-substring-search-up
 bindkey '^[OA' history-substring-search-up
 bindkey '^[[B' history-substring-search-down
 bindkey '^[OB' history-substring-search-down
+
+# Ctrl+Space: accept autosuggestion without leaving home row
+bindkey '^ ' autosuggest-accept

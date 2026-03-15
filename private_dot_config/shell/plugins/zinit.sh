@@ -23,10 +23,10 @@ zinit light zsh-users/zsh-completions
 zinit light zsh-users/zsh-autosuggestions
 zinit light Aloxaf/fzf-tab
 zinit light zsh-users/zsh-history-substring-search
+zinit light MichaelAquilina/zsh-you-should-use
 
 # ── OMZ snippets ───────────────────────────────────────────────────
 zinit snippet OMZL::git.zsh
-zinit snippet OMZP::git
 zinit snippet OMZP::sudo
 zinit snippet OMZP::archlinux
 zinit snippet OMZP::command-not-found

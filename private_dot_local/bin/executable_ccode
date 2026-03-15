@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── Configuration ───────────────────────────────────────
+CONTAINER_NAME="claude-sandbox"
+
+# ─── Colours ─────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# ─── Functions ───────────────────────────────────────────
+usage() {
+    cat << EOF
+Usage: cc [OPTIONS] [-- claude-args...]
+
+Sandboxed Claude Code launcher.
+
+Options:
+  -u, --update        Update Claude Code inside the container
+  -l, --login         Run claude login (OAuth via browser)
+  -e, --enter         Enter the container shell (no Claude Code)
+  -h, --help          Show this help
+
+Examples:
+  cc                  Launch Claude Code in current directory
+  cc -u               Update Claude Code to latest
+  cc -l               Re-authenticate via browser
+  cc -e               Drop into container shell
+  cc -- --resume      Pass flags through to claude
+EOF
+}
+
+check_container() {
+    if ! distrobox list | grep -q "$CONTAINER_NAME"; then
+        echo -e "${RED}Container '$CONTAINER_NAME' not found.${NC}"
+        echo "Create it first (see setup guide)."
+        exit 1
+    fi
+}
+
+
+enter_shell() {
+    distrobox enter "$CONTAINER_NAME"
+}
+
+update_claude() {
+    echo -e "${YELLOW}Updating Claude Code...${NC}"
+    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://claude.ai/install.sh | bash'
+    echo -e "${GREEN}Done. New version:${NC}"
+    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude --version'
+}
+
+run_login() {
+    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude login'
+}
+
+run_claude() {
+    local host_cwd="$PWD"
+    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; cd "'"$host_cwd"'" 2>/dev/null && claude '"$(printf ' %q' "$@")"
+}
+# ─── Argument parsing ────────────────────────────────────
+ACTION="run"
+CLAUDE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -u|--update)      ACTION="update"; shift ;;
+        -l|--login)       ACTION="login"; shift ;;
+        -e|--enter)       ACTION="enter"; shift ;;
+        -h|--help)        usage; exit 0 ;;
+        --)               shift; CLAUDE_ARGS=("$@"); break ;;
+        *)                CLAUDE_ARGS+=("$1"); shift ;;
+    esac
+done
+
+# ─── Execute ─────────────────────────────────────────────
+check_container
+
+case "$ACTION" in
+    update) update_claude ;;
+    login)  run_login ;;
+    enter)  enter_shell ;;
+    run)    run_claude "${CLAUDE_ARGS[@]}" ;;
+esac

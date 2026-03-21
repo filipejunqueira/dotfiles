@@ -1,0 +1,123 @@
+# Starship prompt — Gruvbox Dark theme
+
+format = """
+$directory\
+$git_branch\
+$git_status\
+$python\
+$conda\
+$golang\
+$rust\
+$c\
+$lua\
+$nodejs\
+$java\
+$docker_context\
+$cmd_duration\
+$line_break\
+$character"""
+
+command_timeout = 1000
+
+[character]
+success_symbol = "[❯](bold #b8bb26)"
+error_symbol = "[❯](bold #fb4934)"
+
+[directory]
+style = "bold #fabd2f"
+truncation_length = 0
+truncate_to_repo = false
+read_only = " 󰌾"
+read_only_style = "bold #fb4934"
+
+[git_branch]
+symbol = ""
+style = "bold #83a598"
+format = "on [$symbol$branch(:$remote_branch)]($style) "
+
+[git_status]
+style = "bold #fe8019"
+format = '([$all_status$ahead_behind]($style) )'
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇡${ahead_count}⇣${behind_count}"
+conflicted = "󰀦 ${count}"
+deleted = "󰆴 ${count}"
+modified = "󰤌 ${count}"
+renamed = "󰕍 ${count}"
+staged = "󰐗 ${count}"
+untracked = "󱇰 ${count}"
+stashed = "󰆼 ${count}"
+
+[python]
+symbol = "🐍 "
+style = "bold #b8bb26"
+format = 'via [${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
+detect_extensions = ["py"]
+detect_files = ["requirements.txt", "setup.py", "pyproject.toml", "Pipfile", ".python-version"]
+
+[conda]
+symbol = "🅒 "
+style = "bold #b8bb26"
+format = "via [$symbol$environment]($style) "
+ignore_base = true
+
+[golang]
+symbol = " "
+style = "bold #83a598"
+format = "via [$symbol($version )]($style)"
+
+[rust]
+symbol = "🦀 "
+style = "bold #fb4934"
+format = "via [$symbol($version )]($style)"
+
+[c]
+symbol = " "
+style = "bold #a89984"
+format = "via [$symbol($version(-$name) )]($style)"
+detect_extensions = ["c", "h", "cpp", "hpp", "f90", "f", "F90", "F"]
+
+[lua]
+symbol = " "
+style = "bold #458588"
+format = "via [$symbol($version )]($style)"
+
+[nodejs]
+symbol = " "
+style = "bold #b8bb26"
+format = "via [$symbol($version )]($style)"
+detect_extensions = ["js", "ts", "mjs"]
+detect_files = ["package.json"]
+
+[java]
+symbol = " "
+style = "bold #fb4934"
+format = "via [$symbol($version )]($style)"
+
+[docker_context]
+symbol = " "
+style = "bold #458588"
+format = "via [$symbol$context]($style) "
+only_with_files = true
+
+[cmd_duration]
+min_time = 2000
+style = "bold #a89984"
+format = "[took $duration]($style) "
+show_milliseconds = false
+
+[aws]
+disabled = true
+
+[gcloud]
+disabled = true
+
+[azure]
+disabled = true
+
+[kubernetes]
+disabled = true
+
+[package]
+disabled = true

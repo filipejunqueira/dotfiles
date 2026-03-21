@@ -92,3 +92,7 @@ weatherfull() { curl -s "wttr.in/${1:-}"; }
 cheat() { curl -s "cheat.sh/$1"; }
 myip() { curl -s ifconfig.me; echo; }
 sizeof() { du -sh "$@" 2>/dev/null; }
+
+# Force system clear (conda ncurses lacks xterm-ghostty terminfo)
+alias clear="printf '\033[2J\033[H'"
+alias backmeup="/usr/local/bin/backup-home.sh"

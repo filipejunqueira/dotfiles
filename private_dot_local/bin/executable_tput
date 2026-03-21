@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Wrapper to always use system tput — conda's ncurses lacks xterm-ghostty
+exec /usr/bin/tput "$@"

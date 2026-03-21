@@ -18,3 +18,6 @@
 # typeset -U tells zsh to treat `path` as a unique array — silently
 # drops any entry that already appears earlier in the list.
 [[ -n "$ZSH_VERSION" ]] && typeset -U path
+
+# ── Go ─────────────────────────────────────────────────────────────
+[[ -d "$HOME/go/bin" ]] && export PATH="$HOME/go/bin:$PATH"

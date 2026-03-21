@@ -1,0 +1,9 @@
+# Fix TERM for environments where xterm-ghostty terminfo is unavailable
+# (Distrobox containers, SSH targets without ghostty terminfo installed)
+# .zshenv loads before .zshrc and all plugins — earliest possible override
+if [[ "$TERM" == "xterm-ghostty" ]]; then
+  # Inside a Distrobox container: force xterm-256color
+  if [[ -f /run/.containerenv ]]; then
+    export TERM=xterm-256color
+  fi
+fi

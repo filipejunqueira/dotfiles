@@ -96,3 +96,9 @@ sizeof() { du -sh "$@" 2>/dev/null; }
 # Force system clear (conda ncurses lacks xterm-ghostty terminfo)
 alias clear="printf '\033[2J\033[H'"
 alias backmeup="/usr/local/bin/backup-home.sh"
+
+# Force system tput — conda ncurses does not know xterm-ghostty
+alias tput="/usr/bin/tput"
+
+# ast-grep: structural code search (grep on AST)
+alias grepa='ast-grep'

@@ -15,6 +15,7 @@ return {
     log_level = 'info',
     terminal = {
       provider = 'snacks',
+      cmd = 'ccode',
     },
   },
   keys = {

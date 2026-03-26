@@ -41,7 +41,7 @@ alias cp="cp -iv"
 alias mv="mv -vi"
 alias rm="rm -vI"
 alias mkd="mkdir -pv"
-alias df='df -h'
+alias df='duf'
 alias du='du -h'
 
 # ── Navigation ─────────────────────────────────────────────────────
@@ -102,3 +102,31 @@ alias tput="/usr/bin/tput"
 
 # ast-grep: structural code search (grep on AST)
 alias grepa='ast-grep'
+
+# ASUS ROG power profiles
+alias perf='asusctl profile set Performance && echo "Profile: Performance"'
+alias bal='asusctl profile set Balanced && echo "Profile: Balanced"'
+alias quiet='asusctl profile set Quiet && echo "Profile: Quiet"'
+alias pget='asusctl profile get'
+
+# Modern CLI replacements [2026-03-25]
+# Each alias replaces a standard tool with a better alternative.
+# The original command is always available via \command (e.g. \df, \ps).
+
+alias ps='procs'
+alias dig='doggo'
+alias htop='btop'
+alias top='btop'
+alias neofetch='fastfetch'
+alias ping='gping'
+alias watch='viddy'
+
+# trash-cli — safe deletion (files go to XDG trash, recoverable)
+alias tp='trash-put'
+alias tl='trash-list'
+alias tre='trash-restore'
+alias te='trash-empty'
+
+# Convenience: human-readable by default
+alias dust='dust -r'
+

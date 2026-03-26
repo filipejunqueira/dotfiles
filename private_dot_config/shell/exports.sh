@@ -54,3 +54,6 @@ export LESS=-R
 # BRAVE_API_KEY        → pass show brave/api-key
 # GDRIVE CLIENT_ID     → pass show gdrive/client-id
 # GDRIVE CLIENT_SECRET → pass show gdrive/client-secret
+
+# Podman socket for lazydocker and other Docker-compatible tools
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"

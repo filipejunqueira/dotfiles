@@ -1,0 +1,21 @@
+## atuin config — see `atuin help` for all options
+
+# search style: "compact" saves vertical space
+style = "compact"
+
+# fuzzy search (like fzf), not prefix-only
+search_mode = "fuzzy"
+
+# search all sessions by default, not just current
+filter_mode = "global"
+
+# show preview of full command
+show_preview = true
+
+# max height of search UI
+inline_height = 20
+
+# sync settings (register with: atuin register / atuin login)
+auto_sync = true
+sync_frequency = "5m"
+sync_address = "https://api.atuin.sh"

@@ -26,6 +26,7 @@ source "$SHELL_CONFIG/plugins/fzf.sh"
 source "$SHELL_CONFIG/plugins/zoxide.sh"
 source "$SHELL_CONFIG/plugins/direnv.sh"
 source "$SHELL_CONFIG/plugins/broot.sh"
+source "$SHELL_CONFIG/plugins/atuin.sh"
 
 # ── Keybindings (after zinit plugins are loaded) ───────────────────
 source "$SHELL_CONFIG/keybindings.sh"

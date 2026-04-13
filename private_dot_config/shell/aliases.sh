@@ -6,12 +6,12 @@
 
 # ── Colour support ─────────────────────────────────────────────────
 if [ -x /usr/bin/dircolors ]; then
-  test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
-  alias dir='dir --color=auto'
-  alias vdir='vdir --color=auto'
-  alias grep='grep --color=auto'
-  alias fgrep='fgrep --color=auto'
-  alias egrep='egrep --color=auto'
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias dir='dir --color=auto'
+    alias vdir='vdir --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
 fi
 
 # ── File listing (eza with lsd fallback) ───────────────────────────
@@ -90,7 +90,10 @@ alias yta="yt-dlp --add-metadata -xic"
 weather() { curl -s "wttr.in/${1:-}?format=3"; }
 weatherfull() { curl -s "wttr.in/${1:-}"; }
 cheat() { curl -s "cheat.sh/$1"; }
-myip() { curl -s ifconfig.me; echo; }
+myip() {
+    curl -s ifconfig.me
+    echo
+}
 sizeof() { du -sh "$@" 2>/dev/null; }
 
 # Force system clear (conda ncurses lacks xterm-ghostty terminfo)
@@ -108,6 +111,10 @@ alias perf='asusctl profile set Performance && echo "Profile: Performance"'
 alias bal='asusctl profile set Balanced && echo "Profile: Balanced"'
 alias quiet='asusctl profile set Quiet && echo "Profile: Quiet"'
 alias pget='asusctl profile get'
+
+#Android scrcpy
+
+alias phone="scrcpy -b8M --stay-awake --turn-screen-off"
 
 # Modern CLI replacements [2026-03-25]
 # Each alias replaces a standard tool with a better alternative.
@@ -130,6 +137,5 @@ alias te='trash-empty'
 # Convenience: human-readable by default
 alias dust='dust -r'
 
-
 # Zellij: dump current pane scrollback to clipboard
-alias zcopy='zellij action dump-screen --full --path /tmp/zellij-dump.txt && wl-copy < /tmp/zellij-dump.txt && echo "Copied to clipboard"'
+alias zcopy='zellij action dump-screen --path /tmp/zellij-dump.txt && wl-copy < /tmp/zellij-dump.txt && echo "Copied to clipboard"'

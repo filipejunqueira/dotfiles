@@ -1,42 +1,55 @@
-# Starship prompt — Gruvbox Dark theme
+# Starship prompt — Ember theme
 
 format = """
+$os\
+$username\
+$hostname\
 $directory\
 $git_branch\
 $git_status\
 $python\
 $conda\
+$julia\
+$rlang\
+$fortran\
 $golang\
 $rust\
+$haskell\
+$zig\
+$nix_shell\
 $c\
 $lua\
 $nodejs\
+$bun\
+$deno\
 $java\
 $docker_context\
 $cmd_duration\
 $line_break\
 $character"""
 
+right_format = """$battery$time"""
+
 command_timeout = 1000
 
 [character]
-success_symbol = "[❯](bold #b8bb26)"
-error_symbol = "[❯](bold #fb4934)"
+success_symbol = "[❯](bold #8a9868)"
+error_symbol = "[❯](bold #e08060)"
 
 [directory]
-style = "bold #fabd2f"
+style = "bold #c8b468"
 truncation_length = 0
 truncate_to_repo = false
 read_only = " 󰌾"
-read_only_style = "bold #fb4934"
+read_only_style = "bold #e08060"
 
 [git_branch]
 symbol = ""
-style = "bold #83a598"
+style = "bold #7890a0"
 format = "on [$symbol$branch(:$remote_branch)]($style) "
 
 [git_status]
-style = "bold #fe8019"
+style = "bold #c09058"
 format = '([$all_status$ahead_behind]($style) )'
 ahead = "⇡${count}"
 behind = "⇣${count}"
@@ -51,61 +64,155 @@ stashed = "󰆼 ${count}"
 
 [python]
 symbol = "🐍 "
-style = "bold #b8bb26"
+style = "bold #8a9868"
 format = 'via [${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
 detect_extensions = ["py"]
 detect_files = ["requirements.txt", "setup.py", "pyproject.toml", "Pipfile", ".python-version"]
 
 [conda]
 symbol = "🅒 "
-style = "bold #b8bb26"
+style = "bold #8a9868"
 format = "via [$symbol$environment]($style) "
 ignore_base = true
 
 [golang]
 symbol = " "
-style = "bold #83a598"
+style = "bold #7890a0"
 format = "via [$symbol($version )]($style)"
 
 [rust]
 symbol = "🦀 "
-style = "bold #fb4934"
+style = "bold #b07878"
 format = "via [$symbol($version )]($style)"
 
 [c]
 symbol = " "
-style = "bold #a89984"
+style = "bold #988090"
 format = "via [$symbol($version(-$name) )]($style)"
-detect_extensions = ["c", "h", "cpp", "hpp", "f90", "f", "F90", "F"]
+detect_extensions = ["c", "h", "cpp", "hpp"]
 
 [lua]
 symbol = " "
-style = "bold #458588"
+style = "bold #80a090"
 format = "via [$symbol($version )]($style)"
 
 [nodejs]
 symbol = " "
-style = "bold #b8bb26"
+style = "bold #8a9868"
 format = "via [$symbol($version )]($style)"
 detect_extensions = ["js", "ts", "mjs"]
 detect_files = ["package.json"]
 
 [java]
 symbol = " "
-style = "bold #fb4934"
+style = "bold #c09058"
 format = "via [$symbol($version )]($style)"
 
 [docker_context]
 symbol = " "
-style = "bold #458588"
+style = "bold #80a090"
 format = "via [$symbol$context]($style) "
 only_with_files = true
 
 [cmd_duration]
 min_time = 2000
-style = "bold #a89984"
+style = "bold #988090"
 format = "[took $duration]($style) "
 show_milliseconds = false
+
+# ── Scientific / data ─────────────────────────────────────────────
+
+[julia]
+symbol = "🔮 "
+style = "bold #8a9868"
+format = "via [$symbol($version )]($style)"
+
+[rlang]
+symbol = "📊 "
+style = "bold #7890a0"
+format = "via [$symbol($version )]($style)"
+
+[fortran]
+symbol = "🧮 "
+style = "bold #988090"
+format = "via [$symbol($version )]($style)"
+
+# ── Other languages ───────────────────────────────────────────────
+
+[haskell]
+symbol = "λ "
+style = "bold #80a090"
+format = "via [$symbol($version )]($style)"
+
+[zig]
+symbol = "⚡ "
+style = "bold #c8b468"
+format = "via [$symbol($version )]($style)"
+
+[nix_shell]
+symbol = "❄️ "
+style = "bold #7890a0"
+format = 'via [$symbol$state( \($name\))]($style) '
+
+[bun]
+symbol = "🐰 "
+style = "bold #c09058"
+format = "via [$symbol($version )]($style)"
+
+[deno]
+symbol = "🦕 "
+style = "bold #80a090"
+format = "via [$symbol($version )]($style)"
+
+# ── System info ───────────────────────────────────────────────────
+
+[os]
+disabled = false
+format = "[$symbol]($style) "
+style = "bold #988090"
+
+[os.symbols]
+Arch = "🐧 "
+Linux = "🐧 "
+Macos = "🍎 "
+Windows = "🪟 "
+EndeavourOS = ""
+
+[username]
+style_user = "bold #988090"
+style_root = "bold #e08060"
+format = "[$user]($style)@"
+show_always = false
+disabled = false
+
+[hostname]
+ssh_only = true
+style = "bold #7890a0"
+format = "[$hostname]($style) "
+disabled = false
+
+# ── Right side: battery + clock ───────────────────────────────────
+
+[battery]
+full_symbol = "🔋 "
+charging_symbol = "⚡ "
+discharging_symbol = "🪫 "
+unknown_symbol = "❓ "
+empty_symbol = "💀 "
+
+[[battery.display]]
+threshold = 20
+style = "bold #e08060"
+
+[[battery.display]]
+threshold = 50
+style = "bold #c09058"
+
+[time]
+disabled = false
+format = " [$time]($style)"
+style = "bold #988090"
+time_format = "%H:%M"
 
 [aws]
 disabled = true

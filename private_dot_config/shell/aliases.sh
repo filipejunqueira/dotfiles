@@ -114,7 +114,7 @@ alias pget='asusctl profile get'
 
 #Android scrcpy
 
-alias phone="scrcpy -b8M --stay-awake --turn-screen-off"
+alias phone="scrcpy -b8M --stay-awake"
 
 # Modern CLI replacements [2026-03-25]
 # Each alias replaces a standard tool with a better alternative.

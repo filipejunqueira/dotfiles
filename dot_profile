@@ -1,2 +1,4 @@
 export SSH_ASKPASS="/usr/lib/seahorse/ssh-askpass"
 export SSH_ASKPASS_REQUIRE="prefer"
+
+[ -f "/home/filipejunqueira/.ghcup/env" ] && . "/home/filipejunqueira/.ghcup/env" # ghcup-env

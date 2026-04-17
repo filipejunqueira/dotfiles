@@ -1,11 +1,11 @@
 # Starship prompt — Ember theme
 
 format = """
-$os\
 $username\
 $hostname\
 $directory\
 $git_branch\
+$git_commit\
 $git_status\
 $python\
 $conda\
@@ -24,13 +24,19 @@ $bun\
 $deno\
 $java\
 $docker_context\
+$jobs\
 $cmd_duration\
+$status\
 $line_break\
 $character"""
 
-right_format = """$battery$time"""
+right_format = """$sudo$direnv$memory_usage$aws$gcloud$azure$kubernetes$battery$time"""
 
-command_timeout = 1000
+#------system-info
+command_timeout = 1150
+
+[package]
+disabled = true
 
 [character]
 success_symbol = "[❯](bold #8a9868)"
@@ -40,8 +46,114 @@ error_symbol = "[❯](bold #e08060)"
 style = "bold #c8b468"
 truncation_length = 0
 truncate_to_repo = false
-read_only = " 󰌾"
+read_only = " 󰌾 "
 read_only_style = "bold #e08060"
+
+[status]
+disabled = false
+style = "bold #b07878"
+format = "[$symbol$status($common_meaning)]($style) "
+symbol = "✘ "
+map_symbol = true
+not_found_symbol = "[󱪼](#4a4842) [ :](#d8d0c0) "
+sigint_symbol = "[󱪼](#4a4842) [ ](#d8d0c0):"
+signal_symbol = "[󱪼](#4a4842) [ ](#e08060):"
+
+[cmd_duration]
+min_time = 1500
+style = "bold #988090"
+format = "[󰔟 $duration]($style) "
+show_milliseconds = true
+
+[jobs]
+symbol = " "
+style = "bold #d8d0c0"
+format = "[$symbol$number]($style) "
+threshold = 1
+
+[username]
+style_user = "bold #988090"
+style_root = "bold #e08060"
+format = "[$user]($style)[ @ ](#4a4842)"
+show_always = false
+disabled = false
+
+[hostname]
+ssh_only = false
+style = "bold #7890a0"
+format = "[  ](#d8d0c0)[ 󰇐 ](#4a4842)"
+disabled = false
+
+[sudo]
+disabled = false
+symbol = "  "
+style = "bold #e08060"
+format = "[$symbol]($style) [󱪼](#4a4842)"
+
+[direnv]
+disabled = false
+symbol = " "
+style = "bold #c8b468"
+format = "[$symbol$loaded( $allowed)]($style) [󱪼](#4a4842) "
+detect_extensions = []
+detect_files = [".envrc"]
+
+[battery]
+full_symbol = "  "
+charging_symbol = "  "
+discharging_symbol = " "
+unknown_symbol = " 󰂑 "
+empty_symbol = " 󱉞 "
+
+[[battery.display]]
+threshold = 20
+style = "bold #e08060"
+
+[[battery.display]]
+threshold = 65
+style = "bold #c09058"
+
+[memory_usage]
+disabled = false
+threshold = 75
+symbol = "󰍛 "
+style = "bold #e08060"
+format = "[$symbol${ram}(${swap})]($style) [󱪼](#4a4842)"
+
+[time]
+disabled = false
+format = "[$time]($style)"
+style = "bold #988090"
+time_format = "%H:%M:%S%.3f"
+
+
+#------cloud-services
+
+
+[aws]
+disabled = false
+symbol = "󰅟  "
+style = "bold #c09058"
+format = "[{](#4a4842)[$symbol($profile)($region)]($style)[}](#4a4842)[󱪼](#4a4842) "
+
+[gcloud]
+disabled = false
+symbol = "️󱇶  "
+style = "bold #7890a0"
+format = "[{](#4a4842)[$symbol$project($region)]($style)[}](#4a4842)[󱪼](#4a4842) "
+
+[azure]
+disabled = false
+symbol = "󰏊 󰠅 "
+style = "bold #7890a0"
+format = "[{](#4a4842)[$symbol($subscription)]($style)[}](#4a4842)[󱪼](#4a4842) "
+
+[kubernetes]
+disabled = false
+symbol = " 󰠳  "
+style = "bold #80a090"
+format = "[{](#4a4842)[$symbol$context($namespace)]($style)[}](#4a4842)[󱪼](#4a4842) "
+#------git
 
 [git_branch]
 symbol = ""
@@ -62,169 +174,108 @@ staged = "󰐗 ${count}"
 untracked = "󱇰 ${count}"
 stashed = "󰆼 ${count}"
 
+[git_commit]
+style = "bold #c09058"
+format = "[\\($hash$tag\\)]($style) "
+commit_hash_length = 7
+only_detached = true
+tag_disabled = false
+tag_symbol = " 󰓹 "
+
+#------languages/packages
+
 [python]
-symbol = "🐍 "
+symbol = "󱔎 "
 style = "bold #8a9868"
-format = 'via [${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
+format = '[{](#4a4842)[${symbol}${pyenv_prefix}(${version})(\($virtualenv\) )]($style)[}](#4a4842)'
 detect_extensions = ["py"]
 detect_files = ["requirements.txt", "setup.py", "pyproject.toml", "Pipfile", ".python-version"]
 
 [conda]
-symbol = "🅒 "
+symbol = " "
 style = "bold #8a9868"
-format = "via [$symbol$environment]($style) "
+format = "[{](#4a4842)[$symbol$environment]($style)[}](#4a4842)"
 ignore_base = true
 
 [golang]
-symbol = " "
+symbol = "󰟓 "
 style = "bold #7890a0"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [rust]
-symbol = "🦀 "
+symbol = " "
 style = "bold #b07878"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [c]
-symbol = " "
+symbol = " "
 style = "bold #988090"
-format = "via [$symbol($version(-$name) )]($style)"
+format = "[{](#4a4842)[$symbol($version(-$name))]($style)[}](#4a4842)"
 detect_extensions = ["c", "h", "cpp", "hpp"]
 
 [lua]
-symbol = " "
+symbol = " "
 style = "bold #80a090"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [nodejs]
-symbol = " "
+symbol = " "
 style = "bold #8a9868"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 detect_extensions = ["js", "ts", "mjs"]
 detect_files = ["package.json"]
 
 [java]
-symbol = " "
+symbol = " "
 style = "bold #c09058"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [docker_context]
-symbol = " "
+symbol = " "
 style = "bold #80a090"
-format = "via [$symbol$context]($style) "
+format = "[{](#4a4842)[$symbol$context]($style)[}](#4a4842)"
 only_with_files = true
 
-[cmd_duration]
-min_time = 2000
-style = "bold #988090"
-format = "[took $duration]($style) "
-show_milliseconds = false
-
-# ── Scientific / data ─────────────────────────────────────────────
-
 [julia]
-symbol = "🔮 "
+symbol = " "
 style = "bold #8a9868"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [rlang]
-symbol = "📊 "
+symbol = "󰟔 "
 style = "bold #7890a0"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [fortran]
-symbol = "🧮 "
+symbol = " "
 style = "bold #988090"
-format = "via [$symbol($version )]($style)"
-
-# ── Other languages ───────────────────────────────────────────────
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [haskell]
 symbol = "λ "
 style = "bold #80a090"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [zig]
-symbol = "⚡ "
+symbol = " "
 style = "bold #c8b468"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
 
 [nix_shell]
 symbol = "❄️ "
 style = "bold #7890a0"
-format = 'via [$symbol$state( \($name\))]($style) '
+format = '[{](#4a4842)[$symbol$state( \($name\))]($style)[}](#4a4842)'
 
 [bun]
-symbol = "🐰 "
+symbol = " "
 style = "bold #c09058"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
+
 
 [deno]
 symbol = "🦕 "
 style = "bold #80a090"
-format = "via [$symbol($version )]($style)"
+format = "[{](#4a4842)[$symbol($version)]($style)[}](#4a4842)"
+detect_files = ["deno.json", "deno.jsonc"]
+detect_extensions = []
 
-# ── System info ───────────────────────────────────────────────────
-
-[os]
-disabled = false
-format = "[$symbol]($style) "
-style = "bold #988090"
-
-[os.symbols]
-Arch = "🐧 "
-Linux = "🐧 "
-Macos = "🍎 "
-Windows = "🪟 "
-EndeavourOS = ""
-
-[username]
-style_user = "bold #988090"
-style_root = "bold #e08060"
-format = "[$user]($style)@"
-show_always = false
-disabled = false
-
-[hostname]
-ssh_only = true
-style = "bold #7890a0"
-format = "[$hostname]($style) "
-disabled = false
-
-# ── Right side: battery + clock ───────────────────────────────────
-
-[battery]
-full_symbol = "🔋 "
-charging_symbol = "⚡ "
-discharging_symbol = "🪫 "
-unknown_symbol = "❓ "
-empty_symbol = "💀 "
-
-[[battery.display]]
-threshold = 20
-style = "bold #e08060"
-
-[[battery.display]]
-threshold = 50
-style = "bold #c09058"
-
-[time]
-disabled = false
-format = " [$time]($style)"
-style = "bold #988090"
-time_format = "%H:%M"
-
-[aws]
-disabled = true
-
-[gcloud]
-disabled = true
-
-[azure]
-disabled = true
-
-[kubernetes]
-disabled = true
-
-[package]
-disabled = true

@@ -7,19 +7,19 @@
 SHELL_CONFIG="$HOME/.config/shell"
 
 # ── Core (order-sensitive) ─────────────────────────────────────────
-source "$SHELL_CONFIG/exports.sh"        # XDG vars + env — needed by everything
-source "$SHELL_CONFIG/path.sh"           # PATH — needed by everything
-source "$SHELL_CONFIG/options.sh"        # zsh setopt
-source "$SHELL_CONFIG/history.sh"        # HISTFILE/SIZE
-source "$SHELL_CONFIG/aliases.sh"        # needs EDITOR etc from exports.sh
+source "$SHELL_CONFIG/exports.sh" # XDG vars + env — needed by everything
+source "$SHELL_CONFIG/path.sh"    # PATH — needed by everything
+source "$SHELL_CONFIG/options.sh" # zsh setopt
+source "$SHELL_CONFIG/history.sh" # HISTFILE/SIZE
+source "$SHELL_CONFIG/aliases.sh" # needs EDITOR etc from exports.sh
 
 # ── Plugins ────────────────────────────────────────────────────────
-source "$SHELL_CONFIG/plugins/zinit.sh"  # loads plugins, sets fpath, autoloads functions
+source "$SHELL_CONFIG/plugins/zinit.sh" # loads plugins, sets fpath, autoloads functions
 source "$SHELL_CONFIG/plugins/drift.sh"
 # ── Completion (after zinit has extended fpath) ────────────────────
-source "$SHELL_CONFIG/completion.sh"     # compinit lives here — called once
+source "$SHELL_CONFIG/completion.sh" # compinit lives here — called once
 
-zinit cdreplay -q          # replay compdef calls after compinit
+zinit cdreplay -q # replay compdef calls after compinit
 
 # ── Tool initialisations ───────────────────────────────────────────
 source "$SHELL_CONFIG/plugins/fzf.sh"
@@ -35,6 +35,7 @@ source "$SHELL_CONFIG/keybindings.sh"
 [[ -f "$SHELL_CONFIG/local.sh" ]] && source "$SHELL_CONFIG/local.sh"
 
 # ── Prompt ─────────────────────────────────────────────────────────
+eval "$(direnv hook zsh)"
 eval "$(starship init zsh)"
 
 # >>> mamba initialize >>>
@@ -51,3 +52,5 @@ unset __mamba_setup
 # <<< mamba initialize <<<
 
 source /home/filipejunqueira/.config/broot/launcher/bash/br
+
+[ -f "/home/filipejunqueira/.ghcup/env" ] && . "/home/filipejunqueira/.ghcup/env" # ghcup-env

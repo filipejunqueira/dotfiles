@@ -1,5 +1,12 @@
 # Font
-font-family = JetBrainsMono Nerd Font
+
+
+
+#font-family = Monaspace Radon
+#font-family = Monaspace Argon
+#font-family = Monaspace Neon
+font-family = Monaspace Xenon
+#font-family = Monaspace Krypton
 font-size = 12
 
 
@@ -34,3 +41,4 @@ theme = ember.conf
 window-padding-x = 4
 window-padding-y = 4
 window-decoration = none
+scrollbar = system

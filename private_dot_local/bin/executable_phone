@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# ~/.local/bin/phone — scrcpy via USB if connected, else wireless (mDNS)
+# Flags: --usb (force USB), --wifi (force wireless). Other args pass through to scrcpy.
+
+set -euo pipefail
+
+mode="auto"
+extra=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --usb)     mode="usb";  shift ;;
+        --wifi)    mode="wifi"; shift ;;
+        -h|--help) echo "Usage: phone [--usb|--wifi] [scrcpy args...]"; exit 0 ;;
+        *)         extra+=("$1"); shift ;;
+    esac
+done
+
+SCRCPY_ARGS=(-b8M --stay-awake ${extra[@]+"${extra[@]}"})
+
+adb start-server >/dev/null 2>&1
+
+find_usb() {
+    adb devices | awk 'NR>1 && $2=="device" && $1 !~ /:/ {print $1; exit}'
+}
+
+find_wifi() {
+    local target
+    target=$(adb mdns services 2>/dev/null | awk '/_adb-tls-connect/ {print $NF; exit}')
+    [[ -z "$target" ]] && return 1
+    adb connect "$target" >/dev/null 2>&1 || return 1
+    adb devices | awk -v t="$target" '$1==t && $2=="device"' | grep -q . || return 1
+    echo "$target"
+}
+
+case "$mode" in
+    usb)
+        target=$(find_usb) || true
+        [[ -z "$target" ]] && { echo "✗ --usb forced but no USB device." >&2; exit 1; }
+        echo "→ USB (forced): $target" ;;
+    wifi)
+        echo "→ Wi-Fi (forced). Scanning mDNS…"
+        target=$(find_wifi) || { echo "✗ No wireless device found." >&2; exit 1; }
+        echo "→ Connected: $target" ;;
+    auto)
+        target=$(find_usb) || true
+        if [[ -n "$target" ]]; then
+            echo "→ USB: $target"
+        else
+            echo "→ No USB. Scanning mDNS…"
+            target=$(find_wifi) || { echo "✗ No device found (USB or Wi-Fi)." >&2; exit 1; }
+            echo "→ Wi-Fi: $target"
+        fi ;;
+esac
+
+exec scrcpy -s "$target" "${SCRCPY_ARGS[@]}"

@@ -8,10 +8,22 @@ mode="auto"
 extra=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --usb)     mode="usb";  shift ;;
-        --wifi)    mode="wifi"; shift ;;
-        -h|--help) echo "Usage: phone [--usb|--wifi] [scrcpy args...]"; exit 0 ;;
-        *)         extra+=("$1"); shift ;;
+    --usb)
+        mode="usb"
+        shift
+        ;;
+    --wifi)
+        mode="wifi"
+        shift
+        ;;
+    -h | --help)
+        echo "Usage: phone [--usb|--wifi] [scrcpy args...]"
+        exit 0
+        ;;
+    *)
+        extra+=("$1")
+        shift
+        ;;
     esac
 done
 
@@ -24,32 +36,53 @@ find_usb() {
 }
 
 find_wifi() {
-    local target
-    target=$(adb mdns services 2>/dev/null | awk '/_adb-tls-connect/ {print $NF; exit}')
-    [[ -z "$target" ]] && return 1
+    # Use avahi-browse to find the phone — bypasses adb's missing mDNS support.
+    # -r resolve, -t terminate after first pass, -p parseable output.
+    # Parseable lines look like: =;wlan0;IPv4;HOSTNAME;_adb-tls-connect._tcp;local;HOST.local;192.168.1.42;43217;...
+    local line ip port
+    line=$(avahi-browse -rtp _adb-tls-connect._tcp 2>/dev/null |
+        awk -F';' '/^=/ && $3=="IPv4" {print $8 ";" $9; exit}')
+    [[ -z "$line" ]] && return 1
+
+    ip="${line%;*}"
+    port="${line#*;}"
+    local target="${ip}:${port}"
+
     adb connect "$target" >/dev/null 2>&1 || return 1
     adb devices | awk -v t="$target" '$1==t && $2=="device"' | grep -q . || return 1
     echo "$target"
 }
 
 case "$mode" in
-    usb)
-        target=$(find_usb) || true
-        [[ -z "$target" ]] && { echo "✗ --usb forced but no USB device." >&2; exit 1; }
-        echo "→ USB (forced): $target" ;;
-    wifi)
-        echo "→ Wi-Fi (forced). Scanning mDNS…"
-        target=$(find_wifi) || { echo "✗ No wireless device found." >&2; exit 1; }
-        echo "→ Connected: $target" ;;
-    auto)
-        target=$(find_usb) || true
-        if [[ -n "$target" ]]; then
-            echo "→ USB: $target"
-        else
-            echo "→ No USB. Scanning mDNS…"
-            target=$(find_wifi) || { echo "✗ No device found (USB or Wi-Fi)." >&2; exit 1; }
-            echo "→ Wi-Fi: $target"
-        fi ;;
+usb)
+    target=$(find_usb) || true
+    [[ -z "$target" ]] && {
+        echo "✗ --usb forced but no USB device." >&2
+        exit 1
+    }
+    echo "→ USB (forced): $target"
+    ;;
+wifi)
+    echo "→ Wi-Fi (forced). Scanning mDNS…"
+    target=$(find_wifi) || {
+        echo "✗ No wireless device found." >&2
+        exit 1
+    }
+    echo "→ Connected: $target"
+    ;;
+auto)
+    target=$(find_usb) || true
+    if [[ -n "$target" ]]; then
+        echo "→ USB: $target"
+    else
+        echo "→ No USB. Scanning mDNS…"
+        target=$(find_wifi) || {
+            echo "✗ No device found (USB or Wi-Fi)." >&2
+            exit 1
+        }
+        echo "→ Wi-Fi: $target"
+    fi
+    ;;
 esac
 
 exec scrcpy -s "$target" "${SCRCPY_ARGS[@]}"

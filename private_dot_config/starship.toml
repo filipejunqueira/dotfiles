@@ -81,7 +81,7 @@ disabled = false
 [hostname]
 ssh_only = false
 style = "bold #7890a0"
-format = "[  ](#d8d0c0)[ 󰇐 ](#4a4842)"
+format = "[ ](#d8d0c0)[ 󰇐 ](#4a4842)"
 disabled = false
 
 [sudo]

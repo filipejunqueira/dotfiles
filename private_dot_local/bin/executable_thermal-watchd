@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""thermal-watchd: long-running daemon that polls temps, maintains a rolling
+window, and writes a pre-formatted Starship prompt segment to a file.
+
+Architecture:
+  - Polls CPU + iGPU every POLL_INTERVAL_S (cheap sysfs reads)
+  - Polls dGPU every DGPU_POLL_EVERY_N ticks (skipped when suspended)
+  - Maintains per-metric rolling windows of WINDOW_S seconds
+  - Display value: rolling average, OR latest if it crossed CRIT[metric]
+  - Writes ANSI-coloured segment to $XDG_RUNTIME_DIR/thermal-watch/segment
+  - Atomic writes (tmp + rename) so the prompt never reads a partial segment
+  - Logs each tick to ~/.local/state/thermal-watch/temps.jsonl
+
+Run standalone:
+    python3 thermal-watchd.py                 # runs forever
+    python3 thermal-watchd.py --once          # one tick, print segment, exit
+    python3 thermal-watchd.py --interval 2    # poll every 2s instead of 5s
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# Find temps.py next to this script regardless of cwd or how we're invoked
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from temps import TempReader, Sample  # noqa: E402
+
+# ---- configuration ----
+
+POLL_INTERVAL_S = 5
+DGPU_POLL_EVERY_N = 6        # = every 30s when interval=5s
+WINDOW_S = 30                # rolling-average window
+SUSPEND_GAP_S = 60           # if last sample older than this, clear windows
+
+# Critical instantaneous thresholds — latest reading at/above this overrides avg
+CRIT = {"cpu": 88.0, "igpu": 85.0, "dgpu": 83.0}
+
+# Colour bands: (lower_bound_inclusive, hex, bold)
+# 10-band gradient using Ember palette anchors, interpolated where needed.
+BANDS = [
+    (-1e9, "#5078a0", False),  # < 45  deep cool blue
+    (45.0, "#7090a8", False),  # 45-55 cool blue
+    (55.0, "#80a090", False),  # 55-62 mint
+    (62.0, "#8a9868", False),  # 62-70 green (normal)
+    (70.0, "#a8a060", False),  # 70-76 yellow-green
+    (76.0, "#c8b468", False),  # 76-82 gold
+    (82.0, "#c09058", False),  # 82-88 amber
+    (88.0, "#d07858", False),  # 88-92 orange
+    (92.0, "#e08060", False),  # 92-95 red
+    (95.0, "#e06050", True),   # >=95 bold bright red (critical)
+]
+
+# When any displayed temp reaches this, prepend a warning glyph to the segment.
+# Tuned for your G14: Ryzen Tjmax is 95°C; sustained 90°C+ is the "look at me"
+# threshold (not damaging short-term, but worth knowing about).
+WARN_DISPLAY = 90.0
+WARN_GLYPH = "\uf071"   #  nf-fa-warning
+WARN_COLOR = "#e08060"
+
+# Separator between values, and placeholder for unavailable/sleeping
+DIM = "#4a4842"
+SEPARATOR = "|"
+UNAVAILABLE_TEXT = "--"
+
+# ---- alert configuration ----
+# Tiered desktop notifications via notify-send. Triggers on SUSTAINED heat,
+# not transient spikes — a brief compile blast won't notify, but vents
+# blocked on the sofa for a minute will.
+#
+# Logic per (metric, tier):
+#   - Increment consecutive_ticks each tick metric is above threshold
+#   - Reset to 0 on any tick at or below threshold
+#   - When consecutive_ticks reaches `sustained_ticks`, fire once
+#   - After firing, suppress until metric stays below threshold for
+#     `rearm_ticks`, OR the hard cooldown elapses, whichever is sooner.
+
+@dataclass(frozen=True)
+class AlertTier:
+    name: str            # 'warn' or 'crit'
+    threshold: float     # °C
+    sustained_ticks: int # consecutive ticks above threshold before firing
+    urgency: str         # notify-send urgency: 'low', 'normal', 'critical'
+
+ALERT_TIERS = {
+    "cpu": [
+        AlertTier("warn", threshold=88.0, sustained_ticks=12, urgency="normal"),
+        AlertTier("crit", threshold=93.0, sustained_ticks=6,  urgency="critical"),
+    ],
+    "igpu": [
+        AlertTier("warn", threshold=85.0, sustained_ticks=12, urgency="normal"),
+        AlertTier("crit", threshold=90.0, sustained_ticks=6,  urgency="critical"),
+    ],
+    "dgpu": [
+        AlertTier("warn", threshold=82.0, sustained_ticks=12, urgency="normal"),
+        AlertTier("crit", threshold=87.0, sustained_ticks=6,  urgency="critical"),
+    ],
+}
+
+# After firing an alert for (metric, tier), don't fire again until either:
+#   - metric stays at-or-below the tier threshold for REARM_TICKS, OR
+#   - HARD_COOLDOWN_S elapses since the alert fired.
+REARM_TICKS = 12          # 60s at 5s/tick
+HARD_COOLDOWN_S = 600.0   # 10 minutes
+
+# Pretty names for notifications
+METRIC_NAMES = {"cpu": "CPU", "igpu": "iGPU", "dgpu": "dGPU"}
+
+# Set to a path (e.g. /tmp/notify-log) to disable real notify-send and just
+# log alerts to that file — used by the test suite. None = real notifications.
+_NOTIFY_OVERRIDE_PATH: str | None = None
+
+# ---- paths ----
+
+def runtime_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base:
+        return Path(base) / "thermal-watch"
+    return Path(f"/tmp/thermal-watch-{os.getuid()}")
+
+
+def state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "thermal-watch"
+
+
+# ---- formatting ----
+
+def color(text: str, hex_color: str, bold: bool = False) -> str:
+    """Wrap text in ANSI 24-bit truecolour, terminated with reset."""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    bold_code = "\x1b[1m" if bold else ""
+    return f"{bold_code}\x1b[38;2;{r};{g};{b}m{text}\x1b[0m"
+
+
+def pick_band(temp: float) -> tuple[str, bool]:
+    """Return (hex, bold) for a temperature."""
+    chosen = (BANDS[0][1], BANDS[0][2])
+    for low, hex_c, bold in BANDS:
+        if temp >= low:
+            chosen = (hex_c, bold)
+        else:
+            break
+    return chosen
+
+
+def format_value(value: float) -> str:
+    """Render a temperature as a coloured 2-char number.
+
+    Width-stable for typical 2-digit temps; 3-digit values (rare) take 3 chars.
+    """
+    rounded = int(round(value))
+    hex_c, bold = pick_band(value)
+    return color(f"{rounded:>2d}", hex_c, bold)
+
+
+def format_unavailable() -> str:
+    """Dim placeholder for an unavailable component (e.g. suspended dGPU)."""
+    return color(UNAVAILABLE_TEXT, DIM)
+
+
+# ---- rolling window ----
+
+class RollingWindow:
+    """Time-bounded sample buffer. Drops samples older than `window_s`."""
+
+    def __init__(self, window_s: float) -> None:
+        self.window_s = window_s
+        self._samples: deque[tuple[float, float]] = deque()
+
+    def add(self, ts: float, value: float | None) -> None:
+        if value is not None:
+            self._samples.append((ts, value))
+        cutoff = ts - self.window_s
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+
+    def average(self) -> float | None:
+        if not self._samples:
+            return None
+        return sum(v for _, v in self._samples) / len(self._samples)
+
+    def latest(self) -> float | None:
+        return self._samples[-1][1] if self._samples else None
+
+    def clear(self) -> None:
+        self._samples.clear()
+
+
+def display_value(window: RollingWindow, crit: float) -> tuple[float | None, bool]:
+    """Return (value_to_display, is_critical_spike)."""
+    avg = window.average()
+    latest = window.latest()
+    if latest is not None and latest >= crit:
+        return latest, True
+    return avg, False
+
+
+# ---- atomic write ----
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content)
+    tmp.replace(path)
+
+
+# ---- alerts ----
+
+def _notify(title: str, body: str, urgency: str) -> None:
+    """Send a desktop notification, or write to override file in test mode."""
+    if _NOTIFY_OVERRIDE_PATH is not None:
+        with open(_NOTIFY_OVERRIDE_PATH, "a") as f:
+            f.write(f"{urgency}|{title}|{body}\n")
+        return
+    try:
+        result = subprocess.run(
+            ["notify-send",
+             "--app-name=thermal-watch",
+             f"--urgency={urgency}",
+             "--icon=temperature-warm-symbolic",
+             title, body],
+            timeout=2.0,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"[thermal-watchd] notify-send rc={result.returncode} "
+                  f"stderr={result.stderr.strip()!r} stdout={result.stdout.strip()!r}",
+                  file=sys.stderr)
+        else:
+            print(f"[thermal-watchd] notification sent: {title!r} ({urgency})",
+                  file=sys.stderr)
+    except FileNotFoundError:
+        print("[thermal-watchd] notify-send not installed (pacman -S libnotify)",
+              file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("[thermal-watchd] notify-send timed out after 2s",
+              file=sys.stderr)
+
+
+@dataclass
+class TierState:
+    """Per-(metric, tier) tracking for sustained-temperature alerting."""
+    consecutive_above: int = 0
+    consecutive_below: int = 0
+    fired: bool = False
+    fired_at: float = 0.0
+
+
+class AlertTracker:
+    """Decides when to fire sustained-temperature notifications.
+
+    `tick(metric, latest_temp, now)` is called once per metric per daemon tick
+    with the LATEST instantaneous reading (not the rolling average — sustained
+    actual heat is what matters here, not smoothed display values).
+    Returns a list of (tier_name, threshold) for any alerts that should fire
+    this tick. Multiple tiers for the same metric can fire in the same tick.
+    """
+
+    def __init__(self) -> None:
+        self.state: dict[tuple[str, str], TierState] = {}
+        for metric, tiers in ALERT_TIERS.items():
+            for tier in tiers:
+                self.state[(metric, tier.name)] = TierState()
+
+    def tick(self, metric: str, latest: float | None, now: float) -> list[AlertTier]:
+        """Update counters and return tiers that should fire this tick."""
+        if latest is None:
+            # No data — don't change state. (e.g. dGPU suspended)
+            return []
+
+        fired_now: list[AlertTier] = []
+        for tier in ALERT_TIERS.get(metric, []):
+            st = self.state[(metric, tier.name)]
+
+            if latest > tier.threshold:
+                st.consecutive_above += 1
+                st.consecutive_below = 0
+                if not st.fired and st.consecutive_above >= tier.sustained_ticks:
+                    st.fired = True
+                    st.fired_at = now
+                    fired_now.append(tier)
+            else:
+                st.consecutive_above = 0
+                st.consecutive_below += 1
+                # Re-arm: cool enough for long enough → ready to fire again
+                if st.fired and st.consecutive_below >= REARM_TICKS:
+                    st.fired = False
+
+            # Hard cooldown re-arm: time-based fallback for the case where
+            # the metric is stuck just above threshold (consecutive_below
+            # never advances) but we still want to be reminded eventually.
+            if st.fired and (now - st.fired_at) >= HARD_COOLDOWN_S:
+                st.fired = False
+
+        return fired_now
+
+
+def alert_message(metric: str, tier: AlertTier, latest: float) -> tuple[str, str]:
+    """Build (title, body) for a notification."""
+    name = METRIC_NAMES[metric]
+    minutes = (tier.sustained_ticks * POLL_INTERVAL_S) / 60.0
+    if tier.name == "crit":
+        title = f"\U0001F525 {name} critical: {latest:.0f}°C"
+    else:
+        title = f"\u26A0 {name} sustained heat: {latest:.0f}°C"
+    body = (
+        f"{name} has been above {tier.threshold:.0f}°C for "
+        f"{minutes:.0f}+ min. Check airflow — laptop on a soft surface, "
+        f"vents covered, or a heavy workload running?"
+    )
+    return title, body
+
+
+# ---- daemon ----
+
+@dataclass
+class Daemon:
+    interval_s: float = POLL_INTERVAL_S
+    dgpu_every_n: int = DGPU_POLL_EVERY_N
+    window_s: float = WINDOW_S
+
+    def __post_init__(self) -> None:
+        self.reader = TempReader()
+        self.windows = {
+            "cpu":  RollingWindow(self.window_s),
+            "igpu": RollingWindow(self.window_s),
+            "dgpu": RollingWindow(self.window_s),
+        }
+        self.alerts = AlertTracker()
+        self.last_sample_ts: float = 0.0
+        self.tick = 0
+        self.runtime = runtime_dir()
+        self.state = state_dir()
+        self.segment_path = self.runtime / "segment"
+        self.snapshot_path = self.runtime / "state.json"
+        self.log_path = self.state / "temps.jsonl"
+
+    def step(self, sample_dgpu: bool) -> dict:
+        """One iteration: read, update windows, write segment + log entry."""
+        sample = self.reader.read()
+
+        # Suspend recovery: if there's a long gap between the previous sample
+        # and this one, window data spans a sleep boundary — clear it.
+        # We use sample.ts on both sides so we're reasoning in one clock.
+        if self.last_sample_ts and (sample.ts - self.last_sample_ts) > SUSPEND_GAP_S:
+            for w in self.windows.values():
+                w.clear()
+        self.last_sample_ts = sample.ts
+
+        self.windows["cpu"].add(sample.ts, sample.cpu)
+        self.windows["igpu"].add(sample.ts, sample.igpu)
+        # dGPU: only feed the window when we actually polled it this tick.
+        # (When the dGPU is suspended, sample.dgpu is None — that just means
+        # "no new data", so we don't add anything; old samples age out.)
+        if sample_dgpu:
+            self.windows["dgpu"].add(sample.ts, sample.dgpu)
+
+        # Build the segment text: positional NUM|NUM|NUM (cpu|igpu|dgpu)
+        parts: list[str] = []
+        critical_flags: dict[str, bool] = {}
+        any_warn = False
+
+        for metric in ("cpu", "igpu", "dgpu"):
+            value, is_crit = display_value(self.windows[metric], CRIT[metric])
+            critical_flags[metric] = is_crit
+            if value is None:
+                # No data, or dGPU suspended — show dim '--' in this position
+                parts.append(format_unavailable())
+            else:
+                parts.append(format_value(value))
+                if value >= WARN_DISPLAY:
+                    any_warn = True
+
+        sep = color(SEPARATOR, DIM)
+        segment = sep.join(parts)
+        if any_warn:
+            segment = color(WARN_GLYPH + " ", WARN_COLOR, bold=True) + segment
+
+        # ---- alerting on sustained heat ----
+        # Use LATEST per-metric reading from the sample (not rolling average,
+        # not display-value-with-spike-override) so alert thresholds reflect
+        # actual sustained instantaneous temps.
+        latest_for_alerts = {
+            "cpu":  sample.cpu,
+            "igpu": sample.igpu,
+            # dGPU: only feed the alert tracker on ticks where we polled it.
+            # On non-poll ticks, pass None so counters don't drift.
+            "dgpu": sample.dgpu if sample_dgpu else None,
+        }
+        fired_alerts: list[dict] = []
+        for metric, latest in latest_for_alerts.items():
+            for tier in self.alerts.tick(metric, latest, sample.ts):
+                title, body = alert_message(metric, tier, latest)  # latest is non-None here
+                _notify(title, body, tier.urgency)
+                fired_alerts.append({
+                    "metric": metric, "tier": tier.name,
+                    "threshold": tier.threshold, "latest": latest,
+                })
+
+        # Atomic write of segment (no trailing newline — goes straight in prompt)
+        atomic_write(self.segment_path, segment)
+
+        # Snapshot state for debugging
+        snapshot = {
+            "ts": sample.ts,
+            "tick": self.tick,
+            "sample": sample.as_dict(),
+            "averages": {m: w.average() for m, w in self.windows.items()},
+            "latest":   {m: w.latest()  for m, w in self.windows.items()},
+            "critical": critical_flags,
+            "alerts_fired": fired_alerts,
+            "segment_visible": segment,
+        }
+        atomic_write(self.snapshot_path, json.dumps(snapshot, indent=2))
+
+        # Append to JSONL log
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a") as f:
+                f.write(json.dumps(snapshot, separators=(",", ":")) + "\n")
+        except OSError as e:
+            # Logging failure shouldn't kill the daemon
+            print(f"[thermal-watchd] log write failed: {e}", file=sys.stderr)
+
+        return snapshot
+
+    def run_forever(self) -> None:
+        # Graceful shutdown
+        stop = {"flag": False}
+        def handler(signum, frame):
+            stop["flag"] = True
+        signal.signal(signal.SIGTERM, handler)
+        signal.signal(signal.SIGINT, handler)
+
+        print(f"[thermal-watchd] starting; interval={self.interval_s}s "
+              f"window={self.window_s}s segment={self.segment_path}",
+              file=sys.stderr)
+
+        while not stop["flag"]:
+            sample_dgpu = (self.tick % self.dgpu_every_n) == 0
+            try:
+                self.step(sample_dgpu=sample_dgpu)
+            except Exception as e:
+                # Never die on a transient read error — just log and continue
+                print(f"[thermal-watchd] tick error: {e!r}", file=sys.stderr)
+            self.tick += 1
+            # Sleep in small slices so SIGTERM is responsive
+            slept = 0.0
+            while slept < self.interval_s and not stop["flag"]:
+                time.sleep(min(0.5, self.interval_s - slept))
+                slept += 0.5
+
+        # Clean up runtime files so the prompt's `when` clause hides the
+        # segment immediately, instead of showing stale temperatures.
+        # State.json is kept; it's useful for debugging post-mortem.
+        for path in (self.segment_path,):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[thermal-watchd] cleanup failed for {path}: {e}",
+                      file=sys.stderr)
+
+        print("[thermal-watchd] shutting down", file=sys.stderr)
+
+
+# ---- entry point ----
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--once", action="store_true",
+                    help="run a single tick, print segment, exit")
+    ap.add_argument("--interval", type=float, default=POLL_INTERVAL_S,
+                    help=f"poll interval seconds (default {POLL_INTERVAL_S})")
+    ap.add_argument("--window", type=float, default=WINDOW_S,
+                    help=f"rolling window seconds (default {WINDOW_S})")
+    ap.add_argument("--test-notify", action="store_true",
+                    help="fire one test notification and exit "
+                         "(verifies notify-send path without thresholds)")
+    args = ap.parse_args()
+
+    if args.test_notify:
+        title = "thermal-watch test"
+        body = ("If you see this, notify-send is working in this environment. "
+                "Sustained-heat alerts will use the same path.")
+        _notify(title, body, "normal")
+        return
+
+    d = Daemon(interval_s=args.interval, window_s=args.window)
+
+    if args.once:
+        snap = d.step(sample_dgpu=True)
+        # Re-read segment from disk to confirm what was actually written
+        seg = d.segment_path.read_text() if d.segment_path.exists() else ""
+        print("segment file contents (raw):")
+        print(repr(seg))
+        print("\nrendered (visible):")
+        print(seg)
+        print("\nstate snapshot:")
+        print(json.dumps(snap, indent=2))
+        return
+
+    d.run_forever()
+
+
+if __name__ == "__main__":
+    main()

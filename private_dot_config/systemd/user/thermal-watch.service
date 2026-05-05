@@ -1,0 +1,43 @@
+[Unit]
+Description=Thermal monitoring daemon (CPU/iGPU/dGPU averages for prompt display)
+Documentation=https://github.com/local/thermal-watch
+# Don't start until the user session is ready (so XDG_RUNTIME_DIR exists,
+# notify-send works, etc.)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/thermal-watchd
+# Send SIGTERM on stop so the daemon's signal handler runs and cleans up
+# the segment file (so the prompt hides instantly on `systemctl --user stop`)
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+# If the daemon dies unexpectedly, restart — but not if it exits cleanly
+# (which only happens on SIGTERM, i.e. an intentional stop).
+Restart=on-failure
+RestartSec=5
+
+# Hardening — none of this is strictly necessary, but it costs nothing and
+# limits damage if anything ever goes wrong. The daemon only needs to read
+# /sys, exec nvidia-smi, and write to its own runtime/state dirs.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/thermal-watch %h/.local/state/thermal-watch
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Resource caps — the daemon should never need more than this
+MemoryMax=64M
+CPUQuota=10%
+
+[Install]
+WantedBy=default.target

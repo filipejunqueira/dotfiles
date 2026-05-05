@@ -30,10 +30,21 @@ $status\
 $line_break\
 $character"""
 
-right_format = """$sudo$direnv$memory_usage$aws$gcloud$azure$kubernetes$battery$time"""
+
+
+
+right_format = """$sudo$direnv${custom.thermal}$memory_usage$aws$gcloud$azure$kubernetes$battery$time"""
 
 #------system-info
 command_timeout = 1150
+
+[custom.thermal]
+description = "CPU|iGPU|dGPU temperatures from thermal-watchd"
+command = '''cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/thermal-watch/segment" 2>/dev/null'''
+when = '''F="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/thermal-watch/segment"; [ -r "$F" ] && [ "$(($(date +%s) - $(stat -c %Y "$F" 2>/dev/null || echo 0)))" -lt 15 ]'''
+shell = ["sh", "--norc", "--noprofile"]
+format = "[](#4a4842)$output[](#4a4842) "
+
 
 [package]
 disabled = true

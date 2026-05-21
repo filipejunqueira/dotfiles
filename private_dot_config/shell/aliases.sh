@@ -137,3 +137,6 @@ alias dust='dust -r'
 
 # Zellij: dump current pane scrollback to clipboard
 alias zcopy='zellij action dump-screen --path /tmp/zellij-dump.txt && wl-copy < /tmp/zellij-dump.txt && echo "Copied to clipboard"'
+
+#yay overide
+alias yain='yay -Syu'

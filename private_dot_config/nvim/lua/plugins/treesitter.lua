@@ -32,6 +32,9 @@ return {
 			"odin",
 			"yaml",
 			"toml",
+			"go",
+			"gomod",
+			"gosum",
 		}
 		require("nvim-treesitter").install(parsers)
 

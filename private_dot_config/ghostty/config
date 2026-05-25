@@ -38,7 +38,12 @@ font-size = 12
 theme = ember.conf
 
 # Window
-window-padding-x = 4
-window-padding-y = 4
-window-decoration = none
+window-padding-x = 0
+window-padding-y = 0
 scrollbar = system
+#custom-shader = shaders/my_cursor_sweep.glsl
+#custom-shader = shaders/my_cursor_ripple.glsl
+window-decoration = auto
+#custom-shader-animation = always
+#background-opacity = 0.0
+#alpha-blending = native

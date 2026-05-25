@@ -1,19 +1,49 @@
--- lua/plugins/treesitter.lua — Syntax highlighting and code understanding
-
+-- lua/plugins/treesitter.lua — nvim-treesitter (MAIN branch, correct API)
 return {
-  'nvim-treesitter/nvim-treesitter',
-  build = ':TSUpdate',
-  config = function()
-    require('nvim-treesitter').setup {
-      ensure_installed = {
-        'bash', 'lua', 'luadoc', 'vim', 'vimdoc', 'query',
-        'python', 'c', 'cpp', 'fortran', 'go', 'gomod', 'gosum',
-        'javascript', 'typescript', 'tsx', 'html', 'css',
-        'json', 'yaml', 'toml', 'kdl', 'xml',
-        'markdown', 'markdown_inline', 'diff',
-        'regex', 'dockerfile',
-      },
-      auto_install = true,
-    }
-  end,
+	"nvim-treesitter/nvim-treesitter",
+	branch = "main",
+	build = ":TSUpdate",
+	config = function()
+		local parsers = {
+			"bash",
+			"lua",
+			"luadoc",
+			"vim",
+			"vimdoc",
+			"query",
+			"diff",
+			"regex",
+			"python",
+			"c",
+			"cpp",
+			"fortran",
+			"javascript",
+			"typescript",
+			"tsx",
+			"html",
+			"css",
+			"json",
+			"xml",
+			"markdown",
+			"markdown_inline",
+			"http",
+			"sql",
+			"latex",
+			"odin",
+			"yaml",
+			"toml",
+		}
+		require("nvim-treesitter").install(parsers)
+
+		-- Start highlighting on any buffer whose language has a parser
+		vim.api.nvim_create_autocmd("FileType", {
+			group = vim.api.nvim_create_augroup("treesitter-highlight", { clear = true }),
+			callback = function(args)
+				local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
+				if lang then
+					pcall(vim.treesitter.start, args.buf, lang)
+				end
+			end,
+		})
+	end,
 }

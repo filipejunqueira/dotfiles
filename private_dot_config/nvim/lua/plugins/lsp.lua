@@ -105,11 +105,13 @@ return {
 				},
 			})
 
-			-- Capabilities (from blink.cmp)
+			-- Capabilities from blink.cmp, applied to *every* server via the '*' wildcard.
+			-- Named server configs below merge on top of this and of nvim-lspconfig's
+			-- bundled lsp/<name>.lua defaults (cmd / filetypes / root markers).
 			local capabilities = require("blink.cmp").get_lsp_capabilities()
+			vim.lsp.config("*", { capabilities = capabilities })
 
-			-- Language servers
-			-- Add/remove servers here. Mason will auto-install them.
+			-- Language servers. Only per-server *overrides* go here.
 			local servers = {
 				lua_ls = {
 					settings = {
@@ -146,7 +148,13 @@ return {
 				texlab = {}, -- LaTeX
 				sqls = {}, -- SQL
 			}
-			-- Tools to install via Mason (servers + formatters + linters)
+
+			-- Register each server's overrides via the native vim.lsp.config API.
+			for server_name, server_config in pairs(servers) do
+				vim.lsp.config(server_name, server_config)
+			end
+
+			-- Tools to install via Mason (LSP servers + formatters + linters).
 			local ensure_installed = vim.tbl_keys(servers or {})
 			vim.list_extend(ensure_installed, {
 				"stylua",
@@ -159,20 +167,19 @@ return {
 				"fprettify", -- fortran formatter
 				"sqlfluff", -- sql linter + formatter
 			})
-
 			require("mason-tool-installer").setup({ ensure_installed = ensure_installed })
 
+			-- mason-lspconfig 2.x: the old `handlers` / `automatic_installation` API is gone.
+			-- It now auto-enables (vim.lsp.enable) whatever servers Mason has installed, picking
+			-- up the configs registered above. Installation is handled by mason-tool-installer.
 			require("mason-lspconfig").setup({
 				ensure_installed = {},
-				automatic_installation = false,
-				handlers = {
-					function(server_name)
-						local server = servers[server_name] or {}
-						server.capabilities = vim.tbl_deep_extend("force", {}, capabilities, server.capabilities or {})
-						require("lspconfig")[server_name].setup(server)
-					end,
-				},
+				automatic_enable = true,
 			})
+
+			-- Odin: ols is installed system-wide (pacman), which Mason doesn't manage, so it
+			-- won't be auto-enabled — enable it explicitly. Capabilities come from '*' above.
+			vim.lsp.enable("ols")
 		end,
 	},
 }

@@ -1,0 +1,3 @@
+codechat() {
+  aichat -c "$1" | sed '/think/,/<\/think>/d'
+}

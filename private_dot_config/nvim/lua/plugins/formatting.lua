@@ -22,8 +22,16 @@ return {
 			if disable_filetypes[vim.bo[bufnr].filetype] then
 				return nil
 			end
+
+			-- Skip large/minified files (e.g. Kustom preset.json) — prettierd stalls on them
+			local max_filesize = 200 * 1024 -- 200 KB
+			local fname = vim.api.nvim_buf_get_name(bufnr)
+			local ok, stats = pcall((vim.uv or vim.loop).fs_stat, fname)
+			if ok and stats and stats.size > max_filesize then
+				return nil
+			end
 			return {
-				timeout_ms = 500,
+				timeout_ms = 5000,
 				lsp_format = "fallback",
 			}
 		end,

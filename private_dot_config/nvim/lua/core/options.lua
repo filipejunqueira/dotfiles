@@ -13,22 +13,23 @@ opt.number = true
 opt.relativenumber = true
 
 -- Mouse
-opt.mouse = 'a'
+opt.mouse = "a"
 
 -- Don't show mode (statusline handles it)
 opt.showmode = false
 
 -- Sync clipboard with OS (scheduled for faster startup)
 vim.schedule(function()
-  opt.clipboard = 'unnamedplus'
+	opt.clipboard = "unnamedplus"
 end)
 
 -- Indentation
 opt.breakindent = true
 opt.smartindent = true
-opt.expandtab = true
-opt.shiftwidth = 2
-opt.tabstop = 2
+opt.expandtab = true -- Tab inserts spaces, not a tab character
+opt.shiftwidth = 4 -- size of an indent (>>, autoindent)
+opt.tabstop = 4 -- a tab counts as 4 spaces
+opt.softtabstop = 4 -- Tab key inserts 4 spaces in insert mode
 
 -- Search
 opt.ignorecase = true
@@ -36,7 +37,7 @@ opt.smartcase = true
 opt.hlsearch = true
 
 -- UI
-opt.signcolumn = 'yes'
+opt.signcolumn = "yes"
 opt.cursorline = true
 opt.scrolloff = 10
 opt.sidescrolloff = 8
@@ -49,10 +50,10 @@ opt.splitbelow = true
 
 -- Whitespace display
 opt.list = true
-opt.listchars = { tab = '» ', trail = '·', nbsp = '␣' }
+opt.listchars = { tab = "» ", trail = "·", nbsp = "␣" }
 
 -- Live substitution preview
-opt.inccommand = 'split'
+opt.inccommand = "split"
 
 -- Timing
 opt.updatetime = 250

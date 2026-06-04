@@ -15,7 +15,7 @@ source "$ZINIT_HOME/zinit.zsh"
 
 # ── Personal functions dir ─────────────────────────────────────────
 fpath=("$HOME/.config/shell/functions" $fpath)
-autoload -Uz extract mkcd quack
+autoload -Uz "$SHELL_CONFIG"/functions/*(N.:t)
 
 # ── Core plugins ───────────────────────────────────────────────────
 zinit light zsh-users/zsh-syntax-highlighting

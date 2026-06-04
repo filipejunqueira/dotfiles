@@ -1,0 +1,33 @@
+#autoload
+function zhist-prune () {
+  local assume_yes=0
+  [[ "$1" == (-y|--yes) ]] && assume_yes=1
+
+  local out
+  out="$(zellij list-sessions --short --no-formatting 2>/dev/null)" || {
+    print -u2 -- "zhist-prune: couldn't query zellij sessions; aborting."; return 1; }
+
+  local -a live; local name
+  for name in ${(f)out}; do
+    name="${name%% *}"
+    name="${name//[^a-zA-Z0-9._-]/_}"
+    [[ -n "$name" ]] && live+="$name"
+  done
+  (( ${#live} )) || {
+    print -u2 -- "zhist-prune: no live sessions detected; aborting to be safe."; return 1; }
+
+  local -a orphans; local f base
+  for f in "$ZELLIJ_SCROLLBACK_DIR"/scrollback-*.log(N); do
+    base="${f:t}"; base="${base#scrollback-}"; base="${base%.log}"
+    (( ${live[(Ie)$base]} )) || orphans+="$f"
+  done
+  (( ${#orphans} )) || { echo "zhist-prune: nothing to prune."; return 0; }
+
+  print -- "Orphaned logs (no matching live session):"
+  print -l -- "${orphans[@]}"
+  if (( ! assume_yes )); then
+    read -q "REPLY?Delete these ${#orphans} file(s)? [y/N] " || { echo; return 1; }
+    echo
+  fi
+  rm -f -- "${orphans[@]}" && _ZJ_WARNED=0 && echo "Pruned ${#orphans} log(s)."
+}

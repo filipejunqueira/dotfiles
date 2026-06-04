@@ -39,14 +39,23 @@ return {
 					Tab = "<Tab> ",
 				},
 			},
+			triggers = {
+				{ "<auto>", mode = "nxso" }, -- which-key defaults (normal/visual/select/op-pending)
+				{ "<c-a>", mode = "i" }, -- let the popup fire for the insert-mode AI menu
+			},
 			spec = {
 				{ "<leader>s", group = "[S]earch" },
 				{ "<leader>t", group = "[T]oggle" },
 				{ "<leader>h", group = "Git [H]unk", mode = { "n", "v" } },
 				{ "<leader>b", group = "[B]uffer" },
 				{ "<leader>a", group = "[A]I / Claude" },
-				{ "<leader>D", group = "[D]ebug" },
-				{ "<leader>R", group = "HTTP / [R]est" },
+				-- Insert-mode AI ghost-text menu (minuet): <C-a> then a/l/n/p/d
+				{ "<c-a>", group = "AI", mode = "i" },
+				{ "<c-a>a", desc = "Accept", mode = "i" },
+				{ "<c-a>l", desc = "Accept line", mode = "i" },
+				{ "<c-a>n", desc = "Next / summon", mode = "i" },
+				{ "<c-a>p", desc = "Prev", mode = "i" },
+				{ "<c-a>d", desc = "Dismiss", mode = "i" },
 			},
 		},
 	},

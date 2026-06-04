@@ -1,0 +1,28 @@
+#autoload
+function clear() {
+  if [[ -z "$ZELLIJ" ]]; then
+    command clear
+    return
+  fi
+
+  if ((_ZJ_DID_WORK)); then
+    local tmp
+    tmp=$(mktemp)
+    zellij action dump-screen --full --path "$tmp"
+    if [[ -s "$tmp" ]]; then
+      mkdir -p "$ZELLIJ_SCROLLBACK_DIR"
+      (
+        flock 9
+        {
+          print -r -- "===== cleared $(date '+%Y-%m-%d %H:%M:%S') | session=${ZELLIJ_SESSION_NAME:-?} pid=$$ ====="
+          cat "$tmp"
+        } >&9
+      ) 9>>"$ZELLIJ_SCROLLBACK_ARCHIVE"
+    fi
+    rm -f "$tmp"
+  fi
+  _ZJ_DID_WORK=0
+
+  _zj_housekeeping_check
+  command zellij action clear
+}

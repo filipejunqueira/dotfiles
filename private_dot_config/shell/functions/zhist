@@ -1,0 +1,9 @@
+#autoload
+function zhist() {
+  [[ -f "$ZELLIJ_SCROLLBACK_ARCHIVE" ]] ||
+    {
+      echo "No archive for this session yet."
+      return 1
+    }
+  nvim + "$ZELLIJ_SCROLLBACK_ARCHIVE"
+}

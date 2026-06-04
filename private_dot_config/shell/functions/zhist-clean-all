@@ -1,0 +1,5 @@
+#autoload
+function zhist-clean-all() {
+  rm -f "$ZELLIJ_SCROLLBACK_DIR"/scrollback-*.log && _ZJ_WARNED=0 &&
+    echo "Cleared all session archives in $ZELLIJ_SCROLLBACK_DIR"
+}

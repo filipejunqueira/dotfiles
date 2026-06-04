@@ -96,8 +96,11 @@ myip() {
 }
 sizeof() { du -sh "$@" 2>/dev/null; }
 
-# Force system clear (conda ncurses lacks xterm-ghostty terminfo)
-alias clear="printf '\033[2J\033[H'"
+# conda ncurses lacks xterm-ghostty terminfo. zsh uses the clear() function;
+# guard this to bash so it doesn't shadow the function in zsh.
+if [ -n "$BASH_VERSION" ]; then
+    alias clear="printf '\033[2J\033[H'"
+fi
 alias backmeup="/usr/local/bin/backup-home.sh"
 
 # Force system tput — conda ncurses does not know xterm-ghostty
@@ -136,7 +139,7 @@ alias te='trash-empty'
 alias dust='dust -r'
 
 # Zellij: dump current pane scrollback to clipboard
-alias zcopy='zellij action dump-screen --path /tmp/zellij-dump.txt && wl-copy < /tmp/zellij-dump.txt && echo "Copied to clipboard"'
+alias zcopy='zellij action dump-screen --full --path /tmp/zellij-dump.txt && wl-copy < /tmp/zellij-dump.txt && echo "Copied to clipboard"'
 
 #yay overide
 alias yain='yay -Syu'

@@ -1,13 +1,11 @@
 # Font
 
-
-
 #font-family = Monaspace Radon
 #font-family = Monaspace Argon
 #font-family = Monaspace Neon
 font-family = Monaspace Xenon
 #font-family = Monaspace Krypton
-font-size = 12
+font-size = 10
 
 
 # Gruvbox Dark palette
@@ -38,12 +36,12 @@ font-size = 12
 theme = ember.conf
 
 # Window
-window-padding-x = 0
-window-padding-y = 0
+window-padding-x = 4
+window-padding-y = 4
 scrollbar = system
 #custom-shader = shaders/my_cursor_sweep.glsl
 #custom-shader = shaders/my_cursor_ripple.glsl
-window-decoration = auto
+window-decoration = false
 #custom-shader-animation = always
-#background-opacity = 0.0
-#alpha-blending = native
+background-opacity = 0.94
+alpha-blending = native

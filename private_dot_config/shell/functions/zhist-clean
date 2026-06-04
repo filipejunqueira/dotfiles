@@ -1,0 +1,5 @@
+#autoload
+function zhist-clean() {
+  : >"$ZELLIJ_SCROLLBACK_ARCHIVE" && _ZJ_WARNED=0 &&
+    echo "Cleared this session's archive: $ZELLIJ_SCROLLBACK_ARCHIVE"
+}

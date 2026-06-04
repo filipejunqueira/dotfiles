@@ -16,6 +16,7 @@ source "$SHELL_CONFIG/aliases.sh" # needs EDITOR etc from exports.sh
 # ── Plugins ────────────────────────────────────────────────────────
 source "$SHELL_CONFIG/plugins/zinit.sh" # loads plugins, sets fpath, autoloads functions
 source "$SHELL_CONFIG/plugins/drift.sh"
+source "$SHELL_CONFIG/plugins/zellij-scrollback.sh"
 # ── Completion (after zinit has extended fpath) ────────────────────
 source "$SHELL_CONFIG/completion.sh" # compinit lives here — called once
 

@@ -1,0 +1,6 @@
+#autoload
+function zhist-all () {
+  local files=( "$ZELLIJ_SCROLLBACK_DIR"/scrollback-*.log(N) )
+  (( ${#files} )) || { echo "No archives yet."; return 1; }
+  nvim "${files[@]}"
+}

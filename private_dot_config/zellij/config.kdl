@@ -83,3 +83,5 @@ plugins {
     configuration location="zellij:configuration"
     plugin-manager location="zellij:plugin-manager"
 }
+
+scroll_buffer_size 50000

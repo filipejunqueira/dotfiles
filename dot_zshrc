@@ -13,6 +13,11 @@ source "$SHELL_CONFIG/options.sh" # zsh setopt
 source "$SHELL_CONFIG/history.sh" # HISTFILE/SIZE
 source "$SHELL_CONFIG/aliases.sh" # needs EDITOR etc from exports.sh
 
+#Gambiarra pro _ozm nao reclamar!!!
+function _omz_register_handler() {
+    :
+}
+
 # ── Plugins ────────────────────────────────────────────────────────
 source "$SHELL_CONFIG/plugins/zinit.sh" # loads plugins, sets fpath, autoloads functions
 source "$SHELL_CONFIG/plugins/drift.sh"

@@ -1,7 +1,14 @@
 #autoload
+# clear() — context-aware screen clear.
+# Outside zellij ($ZELLIJ empty): raw ANSI via printf instead of `command
+#   clear`, avoiding ncurses so conda's broken terminfo can't trigger
+#   "terminals database is inaccessible". \033[H home, \033[2J clear screen,
+#   \033[3J clear scrollback (ghostty supports 3J).
+# Inside zellij: unchanged — archive the pane, then `zellij action clear`,
+#   the only thing that clears zellij's own 50k scroll buffer.
 function clear() {
   if [[ -z "$ZELLIJ" ]]; then
-    command clear
+    printf '\033[H\033[2J\033[3J'
     return
   fi
 

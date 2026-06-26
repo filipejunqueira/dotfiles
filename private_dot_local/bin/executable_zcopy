@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# zcopy — copy the full Zellij scrollback to the clipboard, minus prompt noise.
+#
+# Strips:
+#   * the leading OS/distro icon(s) at the start of each prompt line
+#   * the temperature triple (e.g. 52|48|44) before the timestamp
+# Keeps everything else: git status, language/env version icons, eza file
+# icons, paths, command output.
+#
+# The raw (unfiltered) dump is left at "$dump" for reference.
+
+set -uo pipefail
+
+dump=/tmp/zellij-dump.txt
+
+if ! zellij action dump-screen --full --path "$dump" 2>/dev/null; then
+  echo "zcopy: couldn't dump screen — are you inside a Zellij session?" >&2
+  exit 1
+fi
+
+perl -CSD -pe '
+  s/^\s*(?:[\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}]\s*)+(?=[~\/])//;
+  s/\d+\|\d+\|\d+ (\d{1,2}:\d{2}:\d{2}\.\d+)\h*$/$1/;
+  s/\h+$//;
+' "$dump" | wl-copy
+
+echo "Copied to clipboard (cleaned)"

@@ -33,7 +33,9 @@ EOF
 }
 
 check_container() {
-    if ! distrobox list | grep -q "$CONTAINER_NAME"; then
+    local _list
+    _list="$(distrobox list)"
+    if ! grep -q "$CONTAINER_NAME" <<< "$_list"; then
         echo -e "${RED}Container '$CONTAINER_NAME' not found.${NC}"
         echo "Create it first (see setup guide)."
         exit 1

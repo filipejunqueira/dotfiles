@@ -1,0 +1,57 @@
+######################################################################
+# strip leaked host Zellij env so the container runs its own Zellij cleanly
+unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID ZELLIJ_SOCKET_PATH ZELLIJ_TMP_DIR
+#  ~/.zshrc (claude-sandbox container)
+#
+#  Mirrors host config. Differences:
+#  - No mamba/miniforge3 block (not installed in container)
+#  - Claude Code PATH added
+#  - Custom starship.toml for distinct prompt
+#  - nocorrect alias for pass (avoids passt autocorrect)
+######################################################################
+
+SHELL_CONFIG="$HOME/.config/shell"
+
+# ── Claude Code ────────────────────────────────────────────────────
+export PATH="$HOME/.local/bin:$PATH"
+
+# ── Core (order-sensitive) ─────────────────────────────────────────
+source "$SHELL_CONFIG/exports.sh"
+source "$SHELL_CONFIG/path.sh"
+source "$SHELL_CONFIG/options.sh"
+source "$SHELL_CONFIG/correct-ignore.sh"
+source "$SHELL_CONFIG/history.sh"
+source "$SHELL_CONFIG/aliases.sh"
+
+# ── Plugins ────────────────────────────────────────────────────────
+source "$SHELL_CONFIG/plugins/zinit.sh"
+source "$SHELL_CONFIG/plugins/zellij-scrollback.sh"
+
+# ── Completion (after zinit has extended fpath) ────────────────────
+source "$SHELL_CONFIG/completion.sh"
+
+zinit cdreplay -q
+
+# ── Tool initialisations ───────────────────────────────────────────
+source "$SHELL_CONFIG/plugins/fzf.sh"
+source "$SHELL_CONFIG/plugins/zoxide.sh"
+source "$SHELL_CONFIG/plugins/direnv.sh"
+source "$SHELL_CONFIG/plugins/drift.sh"
+
+# ── Keybindings (after zinit plugins are loaded) ───────────────────
+source "$SHELL_CONFIG/keybindings.sh"
+
+# ── Machine-specific overrides ─────────────────────────────────────
+[[ -f "$SHELL_CONFIG/local.sh" ]] && source "$SHELL_CONFIG/local.sh"
+
+# ── Container-specific ─────────────────────────────────────────────
+export PATH="$HOME/.npm-global/bin:$PATH"
+alias pass='nocorrect pass'
+alias gws='nocorrect gws'
+
+# ── Prompt (uses container-specific starship.toml) ─────────────────
+export STARSHIP_CONFIG="$HOME/.config/starship.toml"
+eval "$(starship init zsh)"
+
+# ── Container-local overrides (env vars, TERM fix) ──────────────
+[[ -f "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"

@@ -55,3 +55,6 @@ eval "$(starship init zsh)"
 
 # ── Container-local overrides (env vars, TERM fix) ──────────────
 [[ -f "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
+
+# claude code repo tooling (ccinit)
+export PATH="$HOME/.claude/bin:$PATH"

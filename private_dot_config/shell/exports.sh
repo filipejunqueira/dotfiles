@@ -51,7 +51,7 @@ export LESS_TERMCAP_us=$'\E[01;36m'
 export LESS=-R
 
 # ── Secrets (NOT here — handled via pass in local.sh, Phase 11b) ───
-# BRAVE_API_KEY        → pass show brave/api-key
+# BRAVE_API_KEY → fetch at point of use: "$(pass show api/brave-search)" — never export globally
 # GDRIVE CLIENT_ID     → pass show gdrive/client-id
 # GDRIVE CLIENT_SECRET → pass show gdrive/client-secret
 

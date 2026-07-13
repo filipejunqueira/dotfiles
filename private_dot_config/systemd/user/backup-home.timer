@@ -1,0 +1,11 @@
+[Unit]
+Description=Run borg backup twice daily
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+OnCalendar=*-*-* 22:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

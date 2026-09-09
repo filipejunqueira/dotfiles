@@ -108,13 +108,13 @@ alias tput="/usr/bin/tput"
 
 # ast-grep: structural code search (grep on AST)
 alias grepa='ast-grep'
-
+{{ if eq .machine_type "laptop" }}
 # ASUS ROG power profiles
 alias perf='asusctl profile set Performance && echo "Profile: Performance"'
 alias bal='asusctl profile set Balanced && echo "Profile: Balanced"'
 alias quiet='asusctl profile set Quiet && echo "Profile: Quiet"'
 alias pget='asusctl profile get'
-
+{{ end }}
 #Android scrcpy
 
 # Modern CLI replacements [2026-03-25]
@@ -142,3 +142,4 @@ alias dust='dust -r'
 
 #yay overide
 alias yain='yay -Syu'
+alias yayall='yay -Syu --noconfirm --noreviewbuild --nodiff'

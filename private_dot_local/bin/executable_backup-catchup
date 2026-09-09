@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# One-shot: wait for the desktop wake window, run the backup, then hold an
+# interactive SSH session open. Refuses to start while another borg run is in
+# progress (2026-09-08: an unguarded break-lock here killed a running `borg check`).
+# The desktop is reached through the `desktop` alias in ~/.ssh/config (dotfiles-private).
+DESK=desktop
+REPO="ssh://${DESK}/mnt/vault_backup/borg-laptop"
+export BORG_PASSCOMMAND="pass keys/borg-laptop"
+export BORG_RSH="ssh -o ConnectTimeout=10 -o BatchMode=yes"
+DEADLINE=$(( $(date +%s) + 25200 ))   # 7h — covers 15:00 and the 19:00 fallback wake
+
+if pgrep -x borg >/dev/null; then
+  echo "a borg run is already in progress — exiting"
+  exit 1
+fi
+
+echo "[$(date +%H:%M:%S)] waiting for desktop (wake due 15:00)..."
+until ssh -o ConnectTimeout=5 -o BatchMode=yes "$DESK" true 2>/dev/null; do
+  [ "$(date +%s)" -gt "$DEADLINE" ] && { echo "DEADLINE PASSED — desktop never appeared"; exec bash; }
+  printf '[%s] not up yet\n' "$(date +%H:%M:%S)"; sleep 15
+done
+echo "[$(date +%H:%M:%S)] DESKTOP UP"
+
+# Safe now: the guard above proved no borg client is running on this machine.
+echo "[$(date +%H:%M:%S)] clearing any stale repo lock..."
+borg break-lock "$REPO" && echo "  lock cleared/none" || echo "  break-lock returned non-zero (usually means no lock)"
+
+echo "[$(date +%H:%M:%S)] running backup (resumes from checkpoint)..."
+/usr/local/bin/backup-home.sh; RC=$?
+echo "[$(date +%H:%M:%S)] backup exited rc=$RC"
+curl -s -d "laptop backup finished rc=$RC" ntfy.sh/$(pass show api/ntfy-desktop-events) >/dev/null 2>&1 || true
+notify-send "Backup finished" "rc=$RC" 2>/dev/null || true
+
+echo "[$(date +%H:%M:%S)] opening SSH session (holds the desktop awake)"
+exec ssh "$DESK"

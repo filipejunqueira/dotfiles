@@ -1,0 +1,2 @@
+# flatpak.txt — application ids (flatpak.txt 2026-09-07; runtimes come as dependencies)
+com.spotify.Client

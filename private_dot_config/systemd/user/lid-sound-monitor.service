@@ -1,0 +1,10 @@
+[Unit]
+Description=Lid open/close sound monitor
+
+[Service]
+ExecStart=/home/filipejunqueira/.local/bin/lid-sound-monitor.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

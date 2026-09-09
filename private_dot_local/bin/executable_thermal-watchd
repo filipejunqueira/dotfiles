@@ -10,6 +10,8 @@ Architecture:
   - Writes ANSI-coloured segment to $XDG_RUNTIME_DIR/thermal-watch/segment
   - Atomic writes (tmp + rename) so the prompt never reads a partial segment
   - Logs each tick to ~/.local/state/thermal-watch/temps.jsonl
+  - Suppresses alerts while ~/.local/state/thermal-watch/mute exists (`chill -n`);
+    the prompt segment is unaffected, so temps stay visible while pop-ups stop
 
 Run standalone:
     python3 thermal-watchd.py                 # runs forever
@@ -130,6 +132,32 @@ def runtime_dir() -> Path:
 def state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "thermal-watch"
+
+
+def mute_path() -> Path:
+    """Marker file written by `chill -n` to silence alerts until the next mode change.
+
+    Deliberately in the STATE dir, not the runtime dir where `segment` lives:
+    the unit declares RuntimeDirectory=thermal-watch, which systemd deletes and
+    recreates on every service start, so a marker there would be lost to any
+    Restart=on-failure — silently un-muting with no `chill` command involved.
+    StateDirectory=thermal-watch is granted to us explicitly and survives restarts.
+    (/tmp is no good either: PrivateTmp=true means chill writes to a different one.)
+    """
+    return state_dir() / "mute"
+
+
+def mute_active() -> bool:
+    """True when alerts should be suppressed.
+
+    Never raises. Anything malformed — missing, unreadable, or a directory where
+    the file should be — degrades to "not muted", so a broken marker can never
+    cost you a genuine heat warning.
+    """
+    try:
+        return mute_path().is_file()
+    except OSError:
+        return False
 
 
 # ---- formatting ----
@@ -307,6 +335,25 @@ class AlertTracker:
 
         return fired_now
 
+    def clear_fired(self) -> None:
+        """Forget all alert state, so the next sustained window is judged afresh.
+
+        Called on the muted -> unmuted edge. Two reasons it clears the counters
+        and not just the `fired` flags:
+          - Leaving `fired` set would let HARD_COOLDOWN_S re-arm it on its own
+            10-minute cycle, so un-muting a still-hot machine could buy up to ten
+            more minutes of silence — the opposite of what un-muting means.
+          - Leaving `consecutive_above` set would fire instantly on the un-mute
+            tick. Un-muting happens by applying a new chill mode, so firing
+            before that mode has had a chance to work is just noise. Starting the
+            sustained window again is the honest reading of "is it still hot?".
+        """
+        for st in self.state.values():
+            st.consecutive_above = 0
+            st.consecutive_below = 0
+            st.fired = False
+            st.fired_at = 0.0
+
 
 def alert_message(metric: str, tier: AlertTier, latest: float) -> tuple[str, str]:
     """Build (title, body) for a notification."""
@@ -341,6 +388,7 @@ class Daemon:
         }
         self.alerts = AlertTracker()
         self.last_sample_ts: float = 0.0
+        self.was_muted = False       # previous tick's mute state, for edge detection
         self.tick = 0
         self.runtime = runtime_dir()
         self.state = state_dir()
@@ -400,14 +448,27 @@ class Daemon:
             # On non-poll ticks, pass None so counters don't drift.
             "dgpu": sample.dgpu if sample_dgpu else None,
         }
+        # `chill -n` silences the pop-ups until the next mode change or reset.
+        # Check the edge BEFORE ticking the tracker: state built up while muted
+        # must not leak into the first unmuted window (see clear_fired).
+        muted = mute_active()
+        if self.was_muted and not muted:
+            self.alerts.clear_fired()
+        self.was_muted = muted
+
         fired_alerts: list[dict] = []
         for metric, latest in latest_for_alerts.items():
             for tier in self.alerts.tick(metric, latest, sample.ts):
-                title, body = alert_message(metric, tier, latest)  # latest is non-None here
-                _notify(title, body, tier.urgency)
+                # Suppress the notification, not the bookkeeping: the tracker still
+                # runs and the event is still logged (flagged suppressed), so the
+                # JSONL stays an honest record of what the machine actually did.
+                if not muted:
+                    title, body = alert_message(metric, tier, latest)  # latest is non-None here
+                    _notify(title, body, tier.urgency)
                 fired_alerts.append({
                     "metric": metric, "tier": tier.name,
                     "threshold": tier.threshold, "latest": latest,
+                    "suppressed": muted,
                 })
 
         # Atomic write of segment (no trailing newline — goes straight in prompt)
@@ -421,6 +482,7 @@ class Daemon:
             "averages": {m: w.average() for m, w in self.windows.items()},
             "latest":   {m: w.latest()  for m, w in self.windows.items()},
             "critical": critical_flags,
+            "muted": muted,
             "alerts_fired": fired_alerts,
             "segment_visible": segment,
         }

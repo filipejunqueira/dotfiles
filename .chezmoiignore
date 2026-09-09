@@ -1,1 +1,38 @@
 .config/shell/local.sh
+
+# 13d.1 script 01 — laptop-only (P4) entries, never rendered on the desktop
+{{- if eq .machine_type "desktop" }}
+.config/systemd/user/backup-home.service
+.config/systemd/user/backup-home.service.d
+.config/systemd/user/backup-home.service.d/**
+.config/systemd/user/backup-home.timer
+.config/systemd/user/backup-home.timer.d
+.config/systemd/user/backup-home.timer.d/**
+.config/systemd/user/thermal-watch.service
+.config/systemd/user/lid-sound-monitor.service
+.local/bin/chill
+.local/bin/thermal-watchd
+.local/bin/temps.py
+.local/bin/frequency_test
+.local/bin/compilebench.sh
+.local/bin/lid-sound-monitor.sh
+.local/bin/backup-catchup
+{{- end }}
+
+# Claude Code project files and caches inside ~/.local/bin — never managed (D8, revised 2026-09-08)
+.local/bin/.claude
+.local/bin/.claude/**
+.local/bin/CLAUDE.md
+.local/bin/TODO.md
+.local/bin/notes
+.local/bin/notes/**
+.local/bin/__pycache__
+.local/bin/__pycache__/**
+.local/bin/.ruff_cache
+.local/bin/.ruff_cache/**
+.local/bin/.gitignore
+
+# The laptop keeps gnome-keyring's SSH agent; the ssh-agent user unit is desktop-only (13d.1 script 19)
+{{- if eq .machine_type "laptop" }}
+.config/systemd/user/ssh-agent.service
+{{- end }}

@@ -1,0 +1,3 @@
+# laptop-only.txt — laptop hardware only (installed with native.txt when machine_type = laptop)
+# 2026-09-09: of the plan's set (asusctl, supergfxctl, rog-control-center, fprintd) only asusctl is installed
+asusctl

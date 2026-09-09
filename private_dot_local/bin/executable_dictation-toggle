@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VOSK_DIR="$HOME/.local/share/vosk"
+LANG_FILE="$VOSK_DIR/.current-lang"
+
+# Default to English
+if [[ ! -f "$LANG_FILE" ]]; then
+    echo "en" > "$LANG_FILE"
+fi
+
+CURRENT_LANG=$(cat "$LANG_FILE")
+
+if pgrep -f "nerd-dictation begin" > /dev/null 2>&1; then
+    nerd-dictation end
+    notify-send "Dictation" "Stopped ($CURRENT_LANG)" --expire-time=1000
+else
+    MODEL_DIR="$VOSK_DIR/model-$CURRENT_LANG"
+    nerd-dictation begin \
+        --vosk-model-dir "$MODEL_DIR" \
+        --simulate-input-tool YDOTOOL &
+    notify-send "Dictation" "Listening ($CURRENT_LANG)..." --expire-time=1000
+fi

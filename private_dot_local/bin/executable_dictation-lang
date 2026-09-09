@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LANG_FILE="$HOME/.local/share/vosk/.current-lang"
+CURRENT=$(cat "$LANG_FILE" 2>/dev/null || echo "en")
+
+if [[ "$CURRENT" == "en" ]]; then
+    echo "pt" > "$LANG_FILE"
+    notify-send "Dictation" "Switched to Português" --expire-time=1500
+else
+    echo "en" > "$LANG_FILE"
+    notify-send "Dictation" "Switched to English" --expire-time=1500
+fi

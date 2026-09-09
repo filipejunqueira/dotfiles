@@ -1,0 +1,13 @@
+# afc-hours.yml — archived --from-history export 2026-09-07 (13d.1 script 09); not installed on the desktop by default.
+name: afc-hours
+channels:
+  - conda-forge
+dependencies:
+  - matplotlib
+  - numpy
+  - pandas
+  - pip
+  - python=3.12
+  - rich
+  - scipy
+  - seaborn

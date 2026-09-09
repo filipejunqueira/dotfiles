@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# ┌─────────────────────────────────────────────────────┐
+# │  compare_src — find and diff src/ across projects   │
+# │                                                     │
+# │  Usage:  compare_src <project_a> <project_b>        │
+# │          compare_src -s lib projA projB             │
+# │          compare_src --exclude __pycache__ A B       │
+# │                                                     │
+# │  Deps:   diff, find, wc (coreutils)                │
+# └─────────────────────────────────────────────────────┘
+set -euo pipefail
+
+readonly RESET=$'\033[0m'
+readonly BOLD=$'\033[1m'
+readonly DIM=$'\033[2m'
+readonly RED=$'\033[38;5;167m'
+readonly GREEN=$'\033[38;5;142m'
+readonly YELLOW=$'\033[38;5;214m'
+readonly BLUE=$'\033[38;5;109m'
+readonly AQUA=$'\033[38;5;108m'
+readonly PURPLE=$'\033[38;5;175m'
+readonly ORANGE=$'\033[38;5;208m'
+readonly GREY=$'\033[38;5;245m'
+readonly BG_DARK=$'\033[48;5;235m'
+
+TARGET_DIR="src"
+EXCLUDES=()
+
+usage() {
+    cat <<EOF
+${BOLD}${AQUA}compare_src${RESET} — recursively compare a target folder across two projects
+
+${BOLD}USAGE${RESET}
+    compare_src [options] <project_a> <project_b>
+
+${BOLD}OPTIONS${RESET}
+    ${GREEN}-s, --subdir NAME${RESET}    Target subfolder to compare (default: src)
+    ${GREEN}-e, --exclude PAT${RESET}    Exclude pattern (repeatable, e.g. __pycache__)
+    ${GREEN}-h, --help${RESET}           Show this help
+
+${BOLD}EXAMPLES${RESET}
+    ${DIM}compare_src ./project-v1 ./project-v2${RESET}
+    ${DIM}compare_src -s lib ~/code/fork ~/code/original${RESET}
+    ${DIM}compare_src -e __pycache__ -e .git projA projB${RESET}
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--subdir) TARGET_DIR="$2"; shift 2 ;;
+        -e|--exclude) EXCLUDES+=("$2"); shift 2 ;;
+        -h|--help) usage ;;
+        -*) echo "${RED}Unknown option: $1${RESET}"; usage ;;
+        *) break ;;
+    esac
+done
+
+if [[ $# -lt 2 ]]; then
+    echo "${RED}${BOLD}Error:${RESET} Two project paths required."
+    echo ""
+    usage
+fi
+
+PROJECT_A="$1"
+PROJECT_B="$2"
+
+header() {
+    local width=60
+    echo ""
+    echo "${BOLD}${BG_DARK}${AQUA}$(printf '─%.0s' $(seq 1 $width))${RESET}"
+    echo "${BOLD}${BG_DARK}${AQUA}  $1$(printf ' %.0s' $(seq 1 $((width - ${#1} - 2))))${RESET}"
+    echo "${BOLD}${BG_DARK}${AQUA}$(printf '─%.0s' $(seq 1 $width))${RESET}"
+}
+
+section() {
+    echo ""
+    echo "  ${BOLD}${BLUE}▎ $1${RESET}"
+    echo "  ${GREY}$(printf '┄%.0s' $(seq 1 50))${RESET}"
+}
+
+icon_ok="${GREEN}✓${RESET}"
+icon_warn="${YELLOW}⚠${RESET}"
+icon_miss="${RED}✗${RESET}"
+icon_diff="${ORANGE}≠${RESET}"
+icon_only="${PURPLE}◆${RESET}"
+icon_same="${GREEN}═${RESET}"
+
+for dir in "$PROJECT_A" "$PROJECT_B"; do
+    if [[ ! -d "$dir" ]]; then
+        echo "${RED}${BOLD}Error:${RESET} $dir is not a directory"
+        exit 1
+    fi
+done
+
+header "compare_src"
+echo ""
+echo "  ${DIM}Project A:${RESET}  ${BOLD}$PROJECT_A${RESET}"
+echo "  ${DIM}Project B:${RESET}  ${BOLD}$PROJECT_B${RESET}"
+echo "  ${DIM}Target:${RESET}     ${BOLD}$TARGET_DIR/${RESET}"
+if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    echo "  ${DIM}Excluding:${RESET}  ${BOLD}${EXCLUDES[*]}${RESET}"
+fi
+
+section "Locating ${TARGET_DIR}/ directories"
+
+find_target() {
+    local base="$1"
+    local label="$2"
+    local results
+    results=$(find "$base" -type d -name "$TARGET_DIR" 2>/dev/null | sort)
+    local count
+    count=$(echo "$results" | grep -c . || true)
+
+    if [[ $count -eq 0 ]]; then
+        echo "    ${icon_miss} ${label}: ${RED}no ${TARGET_DIR}/ found${RESET}"
+        echo ""
+        return 1
+    elif [[ $count -eq 1 ]]; then
+        echo "    ${icon_ok} ${label}: ${DIM}$results${RESET}"
+        echo "$results"
+    else
+        local shortest
+        shortest=$(echo "$results" | awk '{ print length, $0 }' | sort -n | head -1 | cut -d' ' -f2-)
+        echo "    ${icon_warn} ${label}: ${YELLOW}${count} matches — using shallowest:${RESET}"
+        echo "      ${DIM}→ $shortest${RESET}"
+        echo ""
+        echo "      ${DIM}Other candidates:${RESET}"
+        echo "$results" | while read -r line; do
+            if [[ "$line" != "$shortest" ]]; then
+                echo "        ${GREY}$line${RESET}"
+            fi
+        done
+        echo "$shortest"
+    fi
+}
+
+SRC_A_OUTPUT=$(find_target "$PROJECT_A" "Project A")
+SRC_A=$(echo "$SRC_A_OUTPUT" | grep -v '^ ' | grep -v '^\[' | tail -1)
+
+SRC_B_OUTPUT=$(find_target "$PROJECT_B" "Project B")
+SRC_B=$(echo "$SRC_B_OUTPUT" | grep -v '^ ' | grep -v '^\[' | tail -1)
+
+echo "$SRC_A_OUTPUT" | head -n -1
+echo "$SRC_B_OUTPUT" | head -n -1
+
+if [[ -z "$SRC_A" || -z "$SRC_B" ]]; then
+    echo ""
+    echo "  ${RED}${BOLD}Cannot compare — ${TARGET_DIR}/ not found in both projects.${RESET}"
+    exit 1
+fi
+
+EXCLUDE_ARGS=()
+for pat in "${EXCLUDES[@]+"${EXCLUDES[@]}"}"; do
+    EXCLUDE_ARGS+=(-x "$pat")
+done
+
+section "Comparing contents"
+
+DIFF_OUTPUT=$(diff -rq "$SRC_A" "$SRC_B" "${EXCLUDE_ARGS[@]+"${EXCLUDE_ARGS[@]}"}" 2>/dev/null || true)
+
+ONLY_A=()
+ONLY_B=()
+DIFFER=()
+
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    skip=false
+    for pat in "${EXCLUDES[@]+"${EXCLUDES[@]}"}"; do
+        if [[ "$line" == *"$pat"* ]]; then
+            skip=true
+            break
+        fi
+    done
+    $skip && continue
+
+    if [[ "$line" == "Only in $SRC_A"* ]]; then
+        local_path="${line#Only in }"
+        local_path="${local_path/: //}"
+        rel_path="${local_path#"$SRC_A"/}"
+        ONLY_A+=("$rel_path")
+    elif [[ "$line" == "Only in $SRC_B"* ]]; then
+        local_path="${line#Only in }"
+        local_path="${local_path/: //}"
+        rel_path="${local_path#"$SRC_B"/}"
+        ONLY_B+=("$rel_path")
+    elif [[ "$line" == "Files "* ]]; then
+        file_a=$(echo "$line" | sed 's/^Files \(.*\) and .* differ$/\1/')
+        rel_path="${file_a#"$SRC_A"/}"
+        DIFFER+=("$rel_path")
+    fi
+done <<< "$DIFF_OUTPUT"
+
+COUNT_A=$(find "$SRC_A" -type f 2>/dev/null | wc -l)
+COUNT_B=$(find "$SRC_B" -type f 2>/dev/null | wc -l)
+TOTAL_ONLY_A=${#ONLY_A[@]}
+TOTAL_ONLY_B=${#ONLY_B[@]}
+TOTAL_DIFFER=${#DIFFER[@]}
+TOTAL_ISSUES=$((TOTAL_ONLY_A + TOTAL_ONLY_B + TOTAL_DIFFER))
+
+if [[ $TOTAL_ISSUES -eq 0 ]]; then
+    echo ""
+    echo "    ${icon_same} ${GREEN}${BOLD}Projects are identical!${RESET}"
+    echo "    ${DIM}$COUNT_A files in A, $COUNT_B files in B — all match.${RESET}"
+else
+    if [[ $TOTAL_DIFFER -gt 0 ]]; then
+        section "Files that differ (${TOTAL_DIFFER})"
+        echo ""
+        for f in "${DIFFER[@]}"; do
+            echo "    ${icon_diff}  ${BOLD}$f${RESET}"
+
+            SIZE_A=$(wc -c < "$SRC_A/$f" 2>/dev/null || echo "?")
+            SIZE_B=$(wc -c < "$SRC_B/$f" 2>/dev/null || echo "?")
+            LINES_DIFF=$(diff "$SRC_A/$f" "$SRC_B/$f" 2>/dev/null | grep -c '^[<>]' || true)
+            echo "       ${DIM}size: ${SIZE_A}B vs ${SIZE_B}B · ~${LINES_DIFF} changed lines${RESET}"
+        done
+    fi
+
+    if [[ $TOTAL_ONLY_A -gt 0 ]]; then
+        section "Only in Project A (${TOTAL_ONLY_A})"
+        echo ""
+        for f in "${ONLY_A[@]}"; do
+            echo "    ${icon_only}  ${YELLOW}$f${RESET}"
+        done
+    fi
+
+    if [[ $TOTAL_ONLY_B -gt 0 ]]; then
+        section "Only in Project B (${TOTAL_ONLY_B})"
+        echo ""
+        for f in "${ONLY_B[@]}"; do
+            echo "    ${icon_only}  ${YELLOW}$f${RESET}"
+        done
+    fi
+fi
+
+header "Summary"
+echo ""
+echo "  ${DIM}Files in A:${RESET}       ${BOLD}${COUNT_A}${RESET}"
+echo "  ${DIM}Files in B:${RESET}       ${BOLD}${COUNT_B}${RESET}"
+echo ""
+
+if [[ $TOTAL_DIFFER -gt 0 ]]; then
+    echo "  ${icon_diff}  ${ORANGE}${TOTAL_DIFFER} file(s) differ${RESET}"
+else
+    echo "  ${icon_ok}  ${GREEN}0 files differ${RESET}"
+fi
+
+if [[ $TOTAL_ONLY_A -gt 0 ]]; then
+    echo "  ${icon_only}  ${YELLOW}${TOTAL_ONLY_A} only in A${RESET}"
+else
+    echo "  ${icon_ok}  ${GREEN}0 only in A${RESET}"
+fi
+
+if [[ $TOTAL_ONLY_B -gt 0 ]]; then
+    echo "  ${icon_only}  ${YELLOW}${TOTAL_ONLY_B} only in B${RESET}"
+else
+    echo "  ${icon_ok}  ${GREEN}0 only in B${RESET}"
+fi
+
+echo ""
+if [[ $TOTAL_ISSUES -eq 0 ]]; then
+    echo "  ${GREEN}${BOLD}Result: IDENTICAL${RESET}"
+else
+    echo "  ${ORANGE}${BOLD}Result: ${TOTAL_ISSUES} DIFFERENCE(S) FOUND${RESET}"
+fi
+echo ""

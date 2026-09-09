@@ -1,0 +1,57 @@
+# sci — scientific environment (13d.1 script 09; from audit sci_history.yml 2026-09-07, prefix dropped).
+# Recreate on a new machine:   mamba env create -f ~/.config/conda/envs/sci.yml
+# Conda packages come from conda-forge; the pip: block holds the wheels that are not on
+# conda-forge — JAX 0.9.1 with its CUDA-13 plugin and the NVIDIA runtime wheels — and conda
+# installs them through pip after the conda packages. torch comes from conda-forge `pytorch`.
+name: sci
+channels:
+  - conda-forge
+dependencies:
+  - ase
+  - h5py
+  - ipykernel
+  - ipywidgets
+  - jupyterlab
+  - matplotlib
+  - netcdf4
+  - openpyxl
+  - pandas
+  - pillow
+  - plotly
+  - pyarrow
+  - pymatgen
+  - python=3.12
+  - pytorch
+  - pyyaml
+  - rich
+  - scikit-image
+  - scikit-learn
+  - seaborn
+  - spglib
+  - statsmodels
+  - sympy
+  - toml
+  - tqdm
+  - uv
+  - pip:
+    - jax==0.9.1
+    - jax-cuda13-pjrt==0.9.1
+    - jax-cuda13-plugin==0.9.1
+    - jaxlib==0.9.1
+    - ml_dtypes==0.5.4
+    - nvidia-cublas==13.3.0.5
+    - nvidia-cuda-cccl==13.2.27
+    - nvidia-cuda-crt==13.2.51
+    - nvidia-cuda-cupti==13.2.23
+    - nvidia-cuda-nvcc==13.2.51
+    - nvidia-cuda-nvrtc==13.2.51
+    - nvidia-cuda-runtime==13.2.51
+    - nvidia-cudnn-cu13==9.20.0.48
+    - nvidia-cufft==12.2.0.37
+    - nvidia-cusolver==12.1.0.51
+    - nvidia-cusparse==12.7.9.17
+    - nvidia-nccl-cu13==2.29.7
+    - nvidia-nvjitlink==13.2.51
+    - nvidia-nvshmem-cu13==3.5.21
+    - nvidia-nvvm==13.2.51
+    - opt_einsum==3.4.0

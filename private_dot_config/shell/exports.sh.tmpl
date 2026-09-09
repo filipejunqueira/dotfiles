@@ -57,3 +57,7 @@ export LESS=-R
 
 # Podman socket for lazydocker and other Docker-compatible tools
 export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+{{- if eq .machine_type "desktop" }}
+# Desktop: systemd user ssh-agent.service (13d.1 script 19); the laptop uses gnome-keyring's gcr agent
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+{{- end }}

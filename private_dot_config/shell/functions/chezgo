@@ -1,0 +1,66 @@
+chezgo() {
+    if [ $# -eq 0 ]; then
+        echo "Usage: chezgo file1 folder2/ file3 ..."
+        return 1
+    fi
+
+    local failed=()
+    local succeeded=()
+
+    for target in "$@"; do
+        echo "=== Processing: $target ==="
+        if chezmoi add "$target"; then
+            echo "-> added (new or updated) OK"
+            succeeded+=("$target")
+        elif chezmoi re-add "$target"; then
+            echo "-> re-added OK"
+            succeeded+=("$target")
+        else
+            echo "-> FAILED: $target"
+            failed+=("$target")
+            echo
+            continue
+        fi
+
+        local abs_target rel_target
+        abs_target="$(realpath "$target")"
+        rel_target="${abs_target#$HOME/}"
+        if chezmoi managed | grep -qF "$rel_target"; then
+            echo "-> confirmed tracked"
+        else
+            echo "-> WARNING: not found in managed list"
+        fi
+        echo
+    done
+
+    if [ ${#succeeded[@]} -eq 0 ]; then
+        echo "Nothing succeeded, aborting commit."
+        return 1
+    fi
+
+    echo "=== Verifying tracked status ==="
+    chezmoi status
+
+    echo
+    echo "=== Committing ==="
+    local prev_dir
+    prev_dir="$(pwd)"
+
+    chezmoi cd
+    git add .
+    if git commit -m "Update: ${succeeded[*]}"; then
+        echo "-> commit OK"
+    else
+        echo "-> commit FAILED (maybe nothing changed?)"
+    fi
+    cd "$prev_dir"
+
+    echo
+    echo "=== Summary ==="
+    echo "Succeeded: ${succeeded[*]:-none}"
+    echo "Failed:    ${failed[*]:-none}"
+
+    if [ ${#failed[@]} -gt 0 ]; then
+        return 1
+    fi
+}

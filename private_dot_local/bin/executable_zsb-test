@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Test harness for the Zellij scrollback archive feature.
+# Subcommands:
+#   zsb-test gen [N] [TAG]    Generate N test lines with sentinels (default 500)
+#   zsb-test orphan [NAME]    Create a fake orphan log (default name: ghost)
+#   zsb-test verify           Report archive integrity for the current session
+#   zsb-test headers          Print the number of '===== cleared' headers
+#   zsb-test info             Show paths and list all session log files
+#   zsb-test help             Show this help
+set -euo pipefail
+
+sess="${ZELLIJ_SESSION_NAME:-default}"; sess="${sess//[^a-zA-Z0-9._-]/_}"
+SCROLLBACK_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/zellij"
+ARCHIVE="${SCROLLBACK_DIR}/scrollback-${sess}.log"
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  gen)
+    N="${1:-500}"
+    tag="${2:-$(date +%H%M%S)}"
+    echo "================= ZTEST START tag=$tag (top sentinel) ================="
+    echo "If you see THIS via 'zhist', the beginning was NOT truncated."
+    echo "Session: ${ZELLIJ_SESSION_NAME:-<none>}   Archive: $ARCHIVE"
+    echo "Generating $N lines (tag $tag)..."
+    echo "--------------------------------------------------------------"
+    for i in $(seq 1 "$N"); do
+      printf 'ZTEST[%s] line %04d / %04d | %s\n' "$tag" "$i" "$N" \
+        "$(printf '%.0sX' {1..40})"
+    done
+    echo "--------------------------------------------------------------"
+    echo "================= ZTEST END tag=$tag (bottom sentinel) ================="
+    ;;
+
+  orphan)
+    name="${1:-ghost}"
+    [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]] || { echo "bad name"; exit 1; }
+    mkdir -p "$SCROLLBACK_DIR"
+    f="$SCROLLBACK_DIR/scrollback-${name}.log"
+    printf 'fake orphan log for nonexistent session: %s\n' "$name" > "$f"
+    echo "Created orphan: $f"
+    ;;
+
+  verify)
+    if [[ ! -f "$ARCHIVE" ]]; then echo "FAIL: no archive at $ARCHIVE"; exit 1; fi
+    nlines=$(grep -c '^ZTEST\[' "$ARCHIVE" || true)
+    nheaders=$(grep -c '^===== cleared' "$ARCHIVE" || true)
+    has_top=$(grep -q 'ZTEST START' "$ARCHIVE" && echo yes || echo no)
+    has_bot=$(grep -q 'ZTEST END'   "$ARCHIVE" && echo yes || echo no)
+    bytes=$(stat -c%s "$ARCHIVE")
+    printf 'Archive : %s\n'             "$ARCHIVE"
+    printf 'Size    : %s bytes (%s lines total)\n' "$bytes" "$(wc -l < "$ARCHIVE")"
+    printf 'ZTEST   : %s line(s)\n'     "$nlines"
+    printf 'Headers : %s clear-header(s)\n' "$nheaders"
+    printf 'Top sent: %s\n'             "$has_top"
+    printf 'Bot sent: %s\n'             "$has_bot"
+    ;;
+
+  headers)
+    [[ -f "$ARCHIVE" ]] && grep -c '^===== cleared' "$ARCHIVE" || echo 0
+    ;;
+
+  info)
+    echo "Session : ${ZELLIJ_SESSION_NAME:-<none>}"
+    echo "Archive : $ARCHIVE"
+    echo "Dir     : $SCROLLBACK_DIR"
+    echo
+    if [[ -d "$SCROLLBACK_DIR" ]]; then
+      ls -lh "$SCROLLBACK_DIR" 2>/dev/null
+    else
+      echo "(dir does not exist yet)"
+    fi
+    ;;
+
+  help|*)
+    sed -n '1,9p' "$0"
+    ;;
+esac

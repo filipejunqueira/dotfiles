@@ -1,0 +1,17 @@
+# dewarp.yml — archived --from-history export 2026-09-07 (13d.1 script 09); not installed on the desktop by default.
+name: dewarp
+channels:
+  - conda-forge
+dependencies:
+  - img2pdf
+  - matplotlib
+  - numpy
+  - opencv
+  - pillow
+  - poppler
+  - python=3.11
+  - scipy
+  - sympy
+  - pip:
+    - msgspec==0.20.0
+    - page-dewarp==0.2.7

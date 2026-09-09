@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# run_onchange_after_install-packages.sh — install this machine's package manifests
+# (13d.1 script 08). chezmoi runs it again whenever the rendered text changes; the hashes
+# below tie it to the lists in ~/.config/pkglists.
+# native:       {{ include "private_dot_config/pkglists/native.txt" | sha256sum }}
+# aur:          {{ include "private_dot_config/pkglists/aur.txt" | sha256sum }}
+# laptop-only:  {{ include "private_dot_config/pkglists/laptop-only.txt" | sha256sum }}
+# desktop-only: {{ include "private_dot_config/pkglists/desktop-only.txt" | sha256sum }}
+# pipx:         {{ include "private_dot_config/pkglists/pipx.txt" | sha256sum }}
+# uv-tools:     {{ include "private_dot_config/pkglists/uv-tools.txt" | sha256sum }}
+# go-tools:     {{ include "private_dot_config/pkglists/go-tools.txt" | sha256sum }}
+# flatpak:      {{ include "private_dot_config/pkglists/flatpak.txt" | sha256sum }}
+# machine_type: {{ .machine_type }}
+set -euo pipefail
+L="$HOME/.config/pkglists"
+EXTRA="$L/{{ .machine_type }}-only.txt"
+
+want() { grep -hvE '^[[:space:]]*(#|$)' "$@" | sort -u; }
+have_pkgs=$(pacman -Qq | sort)
+miss_native=$(comm -23 <(want "$L/native.txt" "$EXTRA") <(echo "$have_pkgs"))
+miss_aur=$(comm -23 <(want "$L/aur.txt") <(echo "$have_pkgs"))
+miss_pipx=""; miss_uv=""; miss_go=""; miss_flat=""
+command -v pipx    >/dev/null && miss_pipx=$(comm -23 <(want "$L/pipx.txt") <(pipx list --short 2>/dev/null | awk '{print $1}' | sort))
+command -v uv      >/dev/null && miss_uv=$(comm -23 <(want "$L/uv-tools.txt") <(uv tool list 2>/dev/null | awk 'NF && $1 !~ /^-/ {print $1}' | sort))
+command -v go      >/dev/null && miss_go=$(comm -23 <(want "$L/go-tools.txt" | sed 's|.*/||; s|@.*||') <(ls "$HOME/go/bin" 2>/dev/null | sort))
+command -v flatpak >/dev/null && miss_flat=$(comm -23 <(want "$L/flatpak.txt") <(flatpak list --app --columns=application 2>/dev/null | sort))
+
+report() { local n=$1; shift; if [ -n "$*" ]; then echo "== missing $n:"; printf '%s\n' "$@"; else echo "== $n: nothing missing"; fi; }
+report native "$miss_native"; report aur "$miss_aur"; report pipx "$miss_pipx"; report uv-tools "$miss_uv"; report go-tools "$miss_go"; report flatpak "$miss_flat"
+if [ -z "$miss_native$miss_aur$miss_pipx$miss_uv$miss_go$miss_flat" ]; then echo "package manifests satisfied"; exit 0; fi
+if [ ! -t 0 ]; then echo "no terminal — nothing installed; run 'chezmoi apply' from a terminal to install"; exit 0; fi
+read -rp "Install the missing items now? [y/N] " answer
+if [ "$answer" != y ]; then echo "skipped — nothing installed"; exit 0; fi
+
+if [ -n "$miss_native" ]; then echo "$miss_native" | sudo pacman -S --needed -; fi
+if [ -n "$miss_aur" ]; then echo "$miss_aur" | yay -S --needed -; fi
+if [ -n "$miss_pipx" ]; then echo "$miss_pipx" | xargs -r -n1 pipx install; fi
+if [ -n "$miss_uv" ]; then echo "$miss_uv" | xargs -r -n1 uv tool install; fi
+if [ -n "$miss_go" ]; then for m in $(want "$L/go-tools.txt"); do b=${m##*/}; b=${b%%@*}; [ -x "$HOME/go/bin/$b" ] || go install "$m"; done; fi
+if [ -n "$miss_flat" ]; then echo "$miss_flat" | xargs -r -n1 flatpak install -y --user; fi
+echo "package manifests installed"

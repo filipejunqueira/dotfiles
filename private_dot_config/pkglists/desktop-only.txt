@@ -1,0 +1,4 @@
+# desktop-only.txt — installed only on the desktop (from audit/desktop_2026-09-08/pac_native.txt vs the laptop, 13d.0.e 2026-09-09)
+firewall-applet
+lib32-nvidia-utils
+zip

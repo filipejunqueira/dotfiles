@@ -1,0 +1,677 @@
+#!/usr/bin/env bash
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │  chill — thermal/power profiles for ASUS ROG G14 (GA402XI)            │
+# │                                                                        │
+# │  Usage:  chill <mode> | status | reset | list                         │
+# │  Modes:  Palpatine  Malinois  Samwise  John-Wick                     │
+# │          Let-it-go  Treebeard  Sloth   (all case-insensitive)        │
+# │                                                                        │
+# │  LAYOUT (one screen per invocation):                                  │
+# │     <Mode title + tagline>                                            │
+# │     ── BEFORE ──   profile · PPT · curves · fans · temps              │
+# │     Applying: ...                                                     │
+# │     ── AFTER  ──   profile · PPT · curves · fans · temps              │
+# │                                                                        │
+# │  ARCHITECTURE (verified 2026-05-28 on this machine):                  │
+# │  - PROFILE is driven through power-profiles-daemon (PPD), the live    │
+# │    authority. `powerprofilesctl set X` moves platform_profile +       │
+# │    throttle_thermal_policy + EPP coherently and STICKS across         │
+# │    plug/unplug. asusd does NOT auto-switch (change_*_on_ac/battery    │
+# │    are false) and its per-profile PPT tunings are all enabled:false,  │
+# │    so we never touch asusd.ron.                                       │
+# │  - PPT is written DIRECTLY to kernel sysfs (asusd silently gates      │
+# │    asusctl's PPT path: "Tuning is disabled"). asusctl PPT *reads* are │
+# │    cached; always read sysfs current_value for ground truth.          │
+# │  - The PPT max_value is DYNAMIC and power-source-gated:               │
+# │       AC (barrel OR USB-C) -> ceiling 80/80/80                        │
+# │       battery              -> ceiling 35/35/65                        │
+# │    Rails are circularly coupled, so PPT is written with a RELAXATION  │
+# │    loop that clamps each rail to its live [min,max] and re-passes     │
+# │    until converged. On battery, high-PPT modes clamp cleanly to the   │
+# │    ceiling with ONE warning (no EINVAL spam) — this is expected.      │
+# │  - FAN curves go through asusctl (asusd -> EC) and are honoured       │
+# │    identically under every profile (Quiet reaches the same ~5500 RPM  │
+# │    ceiling as Performance), so cold modes live on power-save.         │
+# │                                                                        │
+# │  PPT rails (7940HS, firmware): pl1 15-80 (def 35) sustained,          │
+# │    pl2 25-80 (def 65) slow boost, pl3 35-80 (def 80) fast boost.      │
+# │    Must stay monotonic pl1 <= pl2 <= pl3.                             │
+# │                                                                        │
+# │  Deps: asusctl, asusd, power-profiles-daemon, lm_sensors, sudo        │
+# └──────────────────────────────────────────────────────────────────────┘
+set -uo pipefail # intentionally NOT -e: a hardware tool must degrade, not abort.
+
+readonly RESET=$'\033[0m'
+readonly BOLD=$'\033[1m'
+readonly DIM=$'\033[2m'
+readonly RED=$'\033[38;5;167m'
+readonly GREEN=$'\033[38;5;142m'
+readonly YELLOW=$'\033[38;5;214m'
+readonly BLUE=$'\033[38;5;109m'
+readonly AQUA=$'\033[38;5;108m'
+readonly ORANGE=$'\033[38;5;208m'
+readonly GREY=$'\033[38;5;245m'
+readonly WHITE=$'\033[38;5;231m'
+
+readonly ATTR_DIR="/sys/class/firmware-attributes/asus-armoury/attributes"
+readonly EPP_FILE="/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
+
+readonly PPT_DEFAULT_PL1=35
+readonly PPT_DEFAULT_PL2=65
+readonly PPT_DEFAULT_PL3=80
+
+# -c/--clock override guardrails (MHz). Upper bound is also clamped to the live
+# hardware max in set_max_freq; this floor stops a typo making the box unusable.
+readonly CLOCK_MIN_MHZ=800
+CLOCK_OVERRIDE="" # set by -c/--clock; when non-empty it replaces a mode's cap
+NOTIFY_MUTE=""    # set to 1 by -n/--rm-notifications; silences thermal-watchd's pop-ups
+
+# Last-applied mode is remembered here so `status` can name it (chill is
+# otherwise stateless). Written on every mode/reset; read by do_status.
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chill"
+readonly STATE_FILE="$STATE_DIR/last"
+
+# thermal-watchd (a separate, long-running service) is what pops up the "CPU
+# sustained heat" notifications. It has no idea chill exists, so -n leaves it a
+# marker file it checks once per tick. This path is NOT arbitrary: the unit
+# declares StateDirectory=thermal-watch, so the daemon keeps this directory
+# across restarts. Its RuntimeDirectory (where the prompt segment lives) is
+# wiped and recreated on every service start, and PrivateTmp=true means /tmp
+# isn't shared with us at all — a marker in either place would be lost or unseen.
+readonly MUTE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/thermal-watch"
+readonly MUTE_FILE="$MUTE_DIR/mute"
+
+# ─── Low-level helpers ──────────────────────────────────────────────────
+
+ensure_sudo() {
+    if ! sudo -n true 2>/dev/null; then
+        echo "  ${DIM}sudo required for PPT writes${RESET}"
+        sudo -v || {
+            echo "  ${RED}sudo failed; PPT will not be applied${RESET}" >&2
+            return 1
+        }
+    fi
+}
+
+# PPD profile name -> asusctl/asus platform profile name (for fan-curve calls).
+ppd_to_asus() {
+    case "$1" in
+    performance) echo "Performance" ;;
+    balanced) echo "Balanced" ;;
+    power-saver) echo "Quiet" ;;
+    *) echo "Balanced" ;;
+    esac
+}
+
+power_source() { # -> "AC (barrel)" | "AC (USB-C)" | "battery" | "unknown"
+    local adp uc
+    adp=$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || echo "")
+    uc=$(cat /sys/class/power_supply/ucsi-source-psy-USBC000:001/online 2>/dev/null || echo "")
+    if [ "$adp" = "1" ] && [ "$uc" = "1" ]; then
+        echo "AC (USB-C)"
+    elif [ "$adp" = "1" ]; then
+        echo "AC (barrel)"
+    elif [ "$adp" = "0" ]; then
+        echo "battery"
+    else echo "unknown"; fi
+}
+
+on_battery() { [ "$(cat /sys/class/power_supply/ADP0/online 2>/dev/null || echo 1)" = "0" ]; }
+
+read_ppt() {
+    local a b c
+    a=$(cat "$ATTR_DIR/ppt_pl1_spl/current_value" 2>/dev/null || echo "?")
+    b=$(cat "$ATTR_DIR/ppt_pl2_sppt/current_value" 2>/dev/null || echo "?")
+    c=$(cat "$ATTR_DIR/ppt_pl3_fppt/current_value" 2>/dev/null || echo "?")
+    echo "$a/$b/$c"
+}
+
+read_ppt_ceiling() {
+    local a b c
+    a=$(cat "$ATTR_DIR/ppt_pl1_spl/max_value" 2>/dev/null || echo "?")
+    b=$(cat "$ATTR_DIR/ppt_pl2_sppt/max_value" 2>/dev/null || echo "?")
+    c=$(cat "$ATTR_DIR/ppt_pl3_fppt/max_value" 2>/dev/null || echo "?")
+    echo "$a/$b/$c"
+}
+
+# RELAXATION PPT writer (validated on hardware 2026-05-28).
+# Each pass writes every rail as far toward its target as its CURRENT
+# [min,max] bracket allows; moving one rail lifts its neighbours' ceilings;
+# repeat until converged. Clamping to the live bracket means no out-of-range
+# write is ever attempted (no EINVAL noise). Returns 1 if it cannot fully
+# reach the target (e.g. the battery ceiling) — caller decides if that's OK.
+write_ppt() {
+    local want_pl1="$1" want_pl2="$2" want_pl3="$3"
+    local rails="ppt_pl1_spl ppt_pl2_sppt ppt_pl3_fppt"
+    local goal="$want_pl1/$want_pl2/$want_pl3"
+    local rail want cur lo hi w changed pass
+    for pass in 1 2 3 4 5 6; do
+        changed=0
+        for rail in $rails; do
+            case "$rail" in
+            ppt_pl1_spl) want="$want_pl1" ;;
+            ppt_pl2_sppt) want="$want_pl2" ;;
+            ppt_pl3_fppt) want="$want_pl3" ;;
+            esac
+            cur=$(cat "$ATTR_DIR/$rail/current_value" 2>/dev/null || echo "")
+            [ "$cur" = "$want" ] && continue
+            lo=$(cat "$ATTR_DIR/$rail/min_value" 2>/dev/null || echo "$want")
+            hi=$(cat "$ATTR_DIR/$rail/max_value" 2>/dev/null || echo "$want")
+            w="$want"
+            [ -n "$hi" ] && [ "$w" -gt "$hi" ] 2>/dev/null && w="$hi" # clamp up to live ceiling
+            [ -n "$lo" ] && [ "$w" -lt "$lo" ] 2>/dev/null && w="$lo" # clamp down to live floor
+            [ "$w" = "$cur" ] && continue
+            echo "$w" | sudo tee "$ATTR_DIR/$rail/current_value" >/dev/null 2>&1 && changed=1
+        done
+        [ "$(read_ppt)" = "$goal" ] && return 0
+        [ "$changed" = 0 ] && break # nothing moved -> genuinely at the ceiling
+    done
+    [ "$(read_ppt)" = "$goal" ] && return 0
+    return 1
+}
+
+apply_curve() { asusctl fan-curve --mod-profile "$1" --fan "$2" --data "$3" >/dev/null 2>&1; }
+enable_curves() { asusctl fan-curve --enable-fan-curves true --mod-profile "$1" >/dev/null 2>&1; }
+set_profile() { powerprofilesctl set "$1" >/dev/null 2>&1; } # PPD is the authority
+
+# Cap CPU max frequency on all cores. Arg: integer MHz, or "max" to restore
+# full boost. amd_pstate honours scaling_max_freq as the platform ceiling
+# (kernel >= 6.7), so this bounds real clocks AND voltage -> lower ACTUAL
+# draw and heat. (PPT is only a power ceiling; this caps the clock itself,
+# which is what helps at light load / on a weak socket.) No-op if cpufreq
+# sysfs is absent. Guards against writing below/above the hardware limits.
+set_max_freq() {
+    local want="$1" hw_max hw_min khz
+    hw_max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo "")
+    hw_min=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq 2>/dev/null || echo "")
+    [ -z "$hw_max" ] && return 0 # no cpufreq control here -> nothing to do
+    if [ "$want" = "max" ] || [ -z "$want" ]; then
+        khz="$hw_max"
+    else
+        khz=$((want * 1000))
+        [ -n "$hw_min" ] && [ "$khz" -lt "$hw_min" ] 2>/dev/null && khz="$hw_min" # floor guard
+        [ "$khz" -gt "$hw_max" ] 2>/dev/null && khz="$hw_max"                     # ceiling guard
+    fi
+    echo "$khz" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq >/dev/null 2>&1
+}
+
+# Current CPU max-freq cap vs hardware max, for the snapshot (e.g. "2.2/5.1 GHz").
+read_max_freq() {
+    local cur hw
+    cur=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo "")
+    hw=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo "")
+    { [ -z "$cur" ] || [ -z "$hw" ]; } && {
+        echo "n/a"
+        return
+    }
+    awk -v c="$cur" -v h="$hw" 'BEGIN { printf "%.1f/%.1f GHz", c/1e6, h/1e6 }'
+}
+
+# ─── Notification mute (thermal-watchd) ─────────────────────────────────
+# The mute is a property of the CURRENT mode: every mode and reset re-states it,
+# so it clears itself the next time you run chill without -n. No timeout, no
+# expiry — exactly one thing turns it off, and that's applying a mode.
+# Needs no sudo: the file sits under the user's own state dir.
+
+set_mute_state() { # $1 = on|off
+    if [ "$1" = "on" ]; then
+        mkdir -p "$MUTE_DIR" 2>/dev/null
+        date +%s >"$MUTE_FILE" 2>/dev/null || {
+            echo "  ${YELLOW}⚠  couldn't write $MUTE_FILE — notifications stay on${RESET}" >&2
+            return 1
+        }
+    else
+        rm -f "$MUTE_FILE" 2>/dev/null
+    fi
+}
+
+# Prints the mute's age as a human phrase, or nothing at all when not muted.
+read_mute_state() {
+    local since now
+    [ -f "$MUTE_FILE" ] || return 0
+    since=$(cat "$MUTE_FILE" 2>/dev/null)
+    case "$since" in
+    '' | *[!0-9]*)
+        echo "muted"
+        return 0
+        ;; # unreadable/garbage: still muted, just can't age it
+    esac
+    now=$(date +%s)
+    awk -v s="$since" -v n="$now" 'BEGIN {
+        d = n - s
+        if (d < 60)   { printf "muted %ds ago", d }
+        else if (d < 3600) { printf "muted %dm ago", d/60 }
+        else          { printf "muted %.1fh ago", d/3600 }
+    }'
+}
+
+# ─── State snapshot ─────────────────────────────────────────────────────
+
+snapshot() {
+    local label="$1"
+    local pl1 pl2 pl3 sensor_out cpu_rpm gpu_rpm tctl edge ppd epp prof curves_state src
+
+    pl1=$(cat "$ATTR_DIR/ppt_pl1_spl/current_value" 2>/dev/null || echo "?")
+    pl2=$(cat "$ATTR_DIR/ppt_pl2_sppt/current_value" 2>/dev/null || echo "?")
+    pl3=$(cat "$ATTR_DIR/ppt_pl3_fppt/current_value" 2>/dev/null || echo "?")
+
+    sensor_out=$(sensors 2>/dev/null || true)
+    cpu_rpm=$(echo "$sensor_out" | awk '/cpu_fan:/ {print $2; exit}')
+    gpu_rpm=$(echo "$sensor_out" | awk '/gpu_fan:/ {print $2; exit}')
+    tctl=$(echo "$sensor_out" | awk '/Tctl:/ {print $2; exit}')
+    edge=$(echo "$sensor_out" | awk '/^edge:/ {print $2; exit}')
+
+    prof=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null || echo "?")
+    ppd=$(powerprofilesctl get 2>/dev/null || echo "?")
+    epp=$(cat "$EPP_FILE" 2>/dev/null || echo "?")
+    src=$(power_source)
+
+    # Whole-line /true/ match: asusctl emits "CPU: enabled: true, <curve>".
+    curves_state=$(asusctl fan-curve --get-enabled 2>/dev/null | awk '
+        /^CPU/ { cpu = /true/ ? "on" : "off" }
+        /^GPU/ { gpu = /true/ ? "on" : "off" }
+        END { print "CPU:" (cpu ? cpu : "?") " GPU:" (gpu ? gpu : "?") }
+    ')
+
+    echo "  ${DIM}── ${label} ──${RESET}"
+    if [ "$label" = "CURRENT" ]; then
+        local s_label="" s_ppd="" s_max="" s_ovr="" extra="" stale="" mute_txt=""
+        if [ -r "$STATE_FILE" ]; then IFS='|' read -r s_label s_ppd s_max s_ovr <"$STATE_FILE"; fi
+        if [ -z "$s_label" ]; then
+            s_label="unknown ${DIM}(no mode set yet — run one)${RESET}"
+        else
+            [ "$s_ovr" = "1" ] && [ "$s_max" != "max" ] && extra=" ${YELLOW}· custom cap ${s_max} MHz${RESET}"
+            [ -n "$s_ppd" ] && [ "$s_ppd" != "$ppd" ] && stale=" ${DIM}(profile changed since — may be stale)${RESET}"
+        fi
+        printf "    ${DIM}%-9s${RESET} ${BOLD}%s${RESET}%s%s\n" "Mode:" "$s_label" "$extra" "$stale"
+        mute_txt=$(read_mute_state)
+        if [ -n "$mute_txt" ]; then
+            printf "    ${DIM}%-9s${RESET} ${YELLOW}%s${RESET} ${DIM}(any mode or reset turns them back on)${RESET}\n" "Notify:" "$mute_txt"
+        else
+            printf "    ${DIM}%-9s${RESET} %s\n" "Notify:" "heat alerts active"
+        fi
+    fi
+    printf "    ${DIM}%-9s${RESET} %s ${DIM}(ppd %s · epp %s)${RESET}\n" "Profile:" "${prof:-?}" "${ppd:-?}" "${epp:-?}"
+    printf "    ${DIM}%-9s${RESET} %s / %s / %s W ${DIM}(pl1/pl2/pl3 · ceiling %s)${RESET}\n" "PPT:" "$pl1" "$pl2" "$pl3" "$(read_ppt_ceiling)"
+    printf "    ${DIM}%-9s${RESET} %s\n" "Curves:" "${curves_state:-?}"
+    printf "    ${DIM}%-9s${RESET} cpu %s RPM · gpu %s RPM\n" "Fans:" "${cpu_rpm:-?}" "${gpu_rpm:-?}"
+    printf "    ${DIM}%-9s${RESET} Tctl %s · edge %s ${DIM}· on %s${RESET}\n" "Temps:" "${tctl:-?}" "${edge:-?}" "$src"
+    printf "    ${DIM}%-9s${RESET} %s ${DIM}(cap/hw)${RESET}\n" "CPU max:" "$(read_max_freq)"
+}
+
+# ─── Mode orchestrator ──────────────────────────────────────────────────
+
+run_mode() {
+    local label="$1" color="$2" ppd="$3" cpu_curve="$4" gpu_curve="$5"
+    local spl="$6" sppt="$7" fppt="$8" note="$9"
+    local maxfreq="${10:-max}"                            # optional 10th arg: CPU max-freq cap in MHz, or "max"
+    [ -n "$CLOCK_OVERRIDE" ] && maxfreq="$CLOCK_OVERRIDE" # -c/--clock wins over the mode default
+    local asus_prof
+    asus_prof=$(ppd_to_asus "$ppd")
+
+    echo ""
+    echo "  ${color}${BOLD}${label}${RESET}"
+    [ -n "$note" ] && echo "  ${GREY}${note}${RESET}"
+    echo ""
+    snapshot "BEFORE"
+    echo ""
+    echo "  ${DIM}Applying: profile=${ppd} · PPT=${spl}/${sppt}/${fppt} W · custom CPU+GPU curves${RESET}"
+    [ "$maxfreq" != "max" ] && echo "  ${DIM}          CPU max-freq capped to ${maxfreq} MHz${RESET}${CLOCK_OVERRIDE:+ ${YELLOW}(via -c override)${RESET}}"
+    [ -n "$NOTIFY_MUTE" ] && echo "  ${DIM}          ${YELLOW}heat notifications muted${RESET}${DIM} until the next mode change${RESET}"
+    if on_battery && { [ "$sppt" -gt 35 ] || [ "$fppt" -gt 65 ]; }; then
+        echo "  ${DIM}on battery: PPT ceiling is 35/35/65, target will clamp (expected)${RESET}"
+    fi
+
+    ensure_sudo || true
+    set_profile "$ppd"
+    apply_curve "$asus_prof" cpu "$cpu_curve"
+    apply_curve "$asus_prof" gpu "$gpu_curve"
+    enable_curves "$asus_prof"
+    if ! write_ppt "$spl" "$sppt" "$fppt"; then
+        echo "  ${YELLOW}⚠  PPT could not fully reach ${spl}/${sppt}/${fppt} W — got $(read_ppt) (ceiling $(read_ppt_ceiling))${RESET}" >&2
+    fi
+    set_max_freq "$maxfreq" # "max" restores full boost; a number caps the clock
+
+    # remember what we just applied, so `status` can name the mode
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s|%s|%s|%s\n' "$label" "$ppd" "$maxfreq" "${CLOCK_OVERRIDE:+1}" >"$STATE_FILE" 2>/dev/null || true
+
+    # Heat notifications follow the mode: -n mutes them, and applying any mode
+    # WITHOUT -n clears an earlier mute. This is the only thing that turns them
+    # back on, which is the whole point of the flag.
+    if [ -n "$NOTIFY_MUTE" ]; then set_mute_state on; else set_mute_state off; fi
+
+    sleep 2 # let asusd push the curve to the EC and fans react
+    echo ""
+    snapshot "AFTER"
+    echo ""
+    echo "  ${DIM}CPU curve: ${cpu_curve}${RESET}"
+    echo "  ${DIM}GPU curve: ${gpu_curve}${RESET}"
+    echo ""
+}
+
+# ─── Modes ──────────────────────────────────────────────────────────────
+# Palpatine/Malinois ask for high PPT (AC-only in practice; clamps cleanly
+# on battery). Samwise runs balanced at a trimmed PPT. John Wick / Let-it-go
+# / Treebeard / CP3O sit on power-save with a floored PPT that fits under
+# the battery ceiling, so they're identical plugged or unplugged.
+#
+# ┌── HOW TO TWEAK A MODE ─────────────────────────────────────────────────┐
+# │ Every mode is one call to run_mode with these positional args:          │
+# │                                                                         │
+# │   run_mode "<Label>" "$<COLOR>" "<power-mode>" \                        │
+# │       "<CPU fan curve>" \                                               │
+# │       "<GPU fan curve>" \                                               │
+# │       <pl1> <pl2> <pl3> \                                               │
+# │       "<one-line note shown under the title>" \                         │
+# │       [<CPU max-freq MHz>]   # OPTIONAL 10th arg; omit = full boost      │
+# │                                                                         │
+# │ 1) POWER MODE  (3rd arg) — one of: performance | balanced | power-saver │
+# │    Drives the whole profile via power-profiles-daemon: it sets          │
+# │    platform_profile + throttle_thermal_policy + EPP together.           │
+# │      performance -> snappiest, highest idle draw                        │
+# │      balanced    -> everyday; cooler at light load                      │
+# │      power-saver -> lowest draw / coolest; best for quiet & battery     │
+# │                                                                         │
+# │ 2) PPT  (pl1 pl2 pl3, in watts) — the APU power limits:                 │
+# │      pl1 = sustained (long-term)   range 15–80, default 35              │
+# │      pl2 = slow boost              range 25–80, default 65              │
+# │      pl3 = fast boost (short)      range 35–80, default 80              │
+# │    RULES: must stay monotonic  pl1 <= pl2 <= pl3.                       │
+# │    Lower pl1 = the single biggest lever for less heat / quieter fans    │
+# │    under sustained load (at the cost of sustained compute).             │
+# │    On battery the firmware caps at 35/35/65 and chill clamps cleanly;   │
+# │    floored modes (<=15/25/35) are identical on AC and battery.          │
+# │                                                                         │
+# │ 3) FAN CURVES (CPU then GPU) — a string of EXACTLY 8 points:            │
+# │      "T1c:P1%,T2c:P2%,...,T8c:P8%"   temps ascending, % is 0–100        │
+# │    e.g. "45c:0%,52c:8%,...,97c:100%". Earlier/higher % = louder+cooler; │
+# │    push points right / lower % = quieter+hotter. Keep GPU a few %       │
+# │    below CPU. asusctl long-flag plumbing lives in apply_curve() above.  │
+# │                                                                         │
+# │ 4) CPU MAX-FREQ CAP (optional 10th arg, in MHz) — e.g. 2200.            │
+# │    Unlike PPT (a power CEILING), this bounds the actual clock & voltage │
+# │    via scaling_max_freq, so it cuts REAL draw even at light load. Omit  │
+# │    the arg (or pass "max") to run full boost; any other mode that omits │
+# │    it auto-restores full boost, so caps never "stick" across modes.     │
+# │    hw range is read live (cpuinfo_min/max_freq); values are clamped to  │
+# │    it. Used by CP3O (2200, kind to a weak socket) and Treebeard (3000,  │
+# │    efficiency on battery). Tune those numbers in their mode_* funcs.    │
+# │                                                                         │
+# │ 5) COLOR (2nd arg) — any of the $RED/$BLUE/$GREEN/... vars near the top.│
+# │ To ADD a mode: copy a mode_* function, then wire it into the dispatch   │
+# │ case at the bottom, do_modes(), and print_alias_table().                │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+mode_palpatine() { # performance · full PPT · fans guns-blazing
+    # args: label, color, power-mode, CPU curve, GPU curve, pl1 pl2 pl3, note
+    run_mode "Palpatine" "$RED" "performance" \
+        "40c:35%,48c:50%,55c:62%,62c:74%,70c:86%,78c:95%,85c:100%,97c:100%" \
+        "40c:30%,48c:45%,55c:57%,62c:68%,70c:82%,78c:92%,85c:100%,97c:100%" \
+        35 65 80 \
+        "UNLIMITED POWER — full compute, fans guns-blazing, noise be damned"
+    # the "35 65 80" line above is pl1/pl2/pl3 watts; the two strings are the
+    # CPU then GPU fan curves. See the HOW TO TWEAK box above for the rules.
+}
+
+mode_malinois() { # performance · trimmed PPT · firm, temp-priority fans
+    run_mode "Malinois" "$ORANGE" "performance" \
+        "45c:25%,52c:38%,58c:45%,64c:54%,72c:85%,80c:100%,88c:100%,97c:100%" \
+        "45c:20%,52c:32%,58c:40%,64c:50%,72c:80%,80c:95%,88c:100%,97c:100%" \
+        35 58 70 \
+        "Powerful but disciplined — strong work; fans hold temp over silence" \
+        3200 # <- CPU max-freq cap (MHz): strong but stays off the 95°C wall
+}
+
+mode_samwise() { # balanced · modest PPT · gentle everyday curve
+    run_mode "Samwise" "$BLUE" "balanced" \
+        "45c:0%,52c:8%,58c:16%,64c:26%,72c:40%,80c:58%,88c:80%,97c:100%" \
+        "45c:0%,52c:5%,58c:12%,64c:20%,72c:34%,80c:52%,88c:75%,97c:100%" \
+        28 50 65 \
+        "The dependable everyday carry — snappy, quiet, reasonable temps"
+}
+
+mode_johnwick() { # power-save · floored PPT · near-silent (fans off late)
+    run_mode "John Wick" "$GREY" "power-saver" \
+        "58c:0%,66c:0%,72c:8%,78c:18%,84c:32%,90c:55%,94c:80%,97c:100%" \
+        "58c:0%,66c:0%,72c:5%,78c:14%,84c:28%,90c:50%,94c:75%,97c:100%" \
+        15 25 35 \
+        "Silent professional — meetings, typing, light browsing; fans ~off" \
+        2000 # <- CPU max-freq cap (MHz): keeps a rogue task under the fan-on temp
+}
+
+mode_letitgo() { # power-save · floored PPT · flat 100% fans = coldest
+    run_mode "Let-it-go" "$WHITE" "power-saver" \
+        "20c:100%,30c:100%,40c:100%,50c:100%,60c:100%,70c:100%,80c:100%,97c:100%" \
+        "20c:100%,30c:100%,40c:100%,50c:100%,60c:100%,70c:100%,80c:100%,97c:100%" \
+        15 25 35 \
+        "The cold never bothered it — fans MAX, PPT floored, cool down fast" \
+        1800 # <- CPU max-freq cap (MHz): least heat generated while fans purge
+}
+
+mode_treebeard() { # power-save · floored PPT · runs warm · freq-capped for efficiency
+    run_mode "Treebeard" "$GREEN" "power-saver" \
+        "60c:0%,70c:0%,78c:5%,84c:14%,90c:30%,93c:50%,96c:80%,97c:100%" \
+        "60c:0%,70c:0%,78c:3%,84c:10%,90c:25%,93c:45%,96c:75%,97c:100%" \
+        15 25 35 \
+        "Don't be hasty — max runtime on battery; runs warm to save fan power" \
+        2200 # <- CPU max-freq cap (MHz): measured efficiency peak (~151 MHz/W)
+}
+
+mode_cp3o() { # power-save · floored PPT · gentle, quiet · freq-capped (low draw)
+    run_mode "CP3O" "$YELLOW" "power-saver" \
+        "52c:0%,58c:8%,64c:16%,70c:26%,76c:40%,82c:56%,88c:78%,97c:100%" \
+        "52c:0%,58c:5%,64c:12%,70c:22%,76c:35%,82c:52%,88c:74%,97c:100%" \
+        15 25 35 \
+        "We're doomed — weak/flaky wall socket; floored draw, gentle fans" \
+        1400 # <- CPU max-freq cap (MHz): minimal draw; below ~1800 power stops falling
+}
+
+# ─── Status / Reset / List ──────────────────────────────────────────────
+
+# Modes + aliases. Every name (and alias) is matched case-insensitively, so
+# Palpatine == palpatine == PALPATINE == PalPatine. Shown by status and list.
+print_alias_table() {
+    echo "  ${DIM}Modes & aliases ${GREY}(every name is case-insensitive):${RESET}"
+    printf "    ${RED}%-11s${RESET} ${DIM}%s${RESET}\n" "Palpatine" "—"
+    printf "    ${ORANGE}%-11s${RESET} ${DIM}%s${RESET}\n" "Malinois" "—"
+    printf "    ${BLUE}%-11s${RESET} ${DIM}%s${RESET}\n" "Samwise" "sam"
+    printf "    ${GREY}%-11s${RESET} ${DIM}%s${RESET}\n" "John Wick" "john · wick · johnwick"
+    printf "    ${WHITE}%-11s${RESET} ${DIM}%s${RESET}\n" "Let-it-go" "letitgo · elsa"
+    printf "    ${GREEN}%-11s${RESET} ${DIM}%s${RESET}\n" "Treebeard" "treant"
+    printf "    ${YELLOW}%-11s${RESET} ${DIM}%s${RESET}\n" "CP3O" "c-3po · c3po · sloth · preguica"
+}
+
+do_status() {
+    echo ""
+    echo "  ${BOLD}${AQUA}chill — status${RESET}"
+    echo "  ${GREY}$(printf '┄%.0s' {1..52})${RESET}"
+    snapshot "CURRENT"
+    echo ""
+    echo "  ${DIM}Active fan curves (per-profile, EC-side):${RESET}"
+    local enabled
+    enabled=$(asusctl fan-curve --get-enabled 2>&1)
+    while IFS= read -r line; do
+        if [[ "$line" == CPU* ]] || [[ "$line" == GPU* ]]; then
+            local fan="${line%%:*}" state="${line%%,*}" curve="${line#*, }"
+            if [[ "$state" == *"true"* ]]; then
+                echo "    ${GREEN}${fan}${RESET} ${DIM}${curve}${RESET}"
+            else
+                echo "    ${GREY}${fan} (curve stored, not active) ${curve}${RESET}"
+            fi
+        fi
+    done <<<"$enabled"
+    echo ""
+    print_alias_table
+    echo ""
+}
+
+do_reset() {
+    echo ""
+    echo "  ${GREEN}${BOLD}Reset${RESET} ${GREY}— clean baseline: balanced + stock curves + default PPT${RESET}"
+    echo ""
+    snapshot "BEFORE"
+    echo ""
+    echo "  ${DIM}Applying: profile=balanced · stock fan curves (custom disabled) · PPT ${PPT_DEFAULT_PL1}/${PPT_DEFAULT_PL2}/${PPT_DEFAULT_PL3} W · CPU freq uncapped${RESET}"
+
+    ensure_sudo || true
+    set_profile balanced
+    asusctl fan-curve --default >/dev/null 2>&1 || true
+    asusctl fan-curve --enable-fan-curves false --mod-profile Quiet >/dev/null 2>&1 || true
+    asusctl fan-curve --enable-fan-curves false --mod-profile Balanced >/dev/null 2>&1 || true
+    asusctl fan-curve --enable-fan-curves false --mod-profile Performance >/dev/null 2>&1 || true
+    if ! write_ppt "$PPT_DEFAULT_PL1" "$PPT_DEFAULT_PL2" "$PPT_DEFAULT_PL3"; then
+        echo "  ${YELLOW}⚠  PPT could not fully reach ${PPT_DEFAULT_PL1}/${PPT_DEFAULT_PL2}/${PPT_DEFAULT_PL3} W — got $(read_ppt) (on battery this is expected)${RESET}" >&2
+    fi
+    set_max_freq max # restore full boost
+
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s|%s|%s|%s\n' "reset (baseline)" "balanced" "max" "" >"$STATE_FILE" 2>/dev/null || true
+
+    # Same rule as run_mode: reset is a mode change, so it clears a mute unless
+    # you explicitly ask for one again with -n.
+    if [ -n "$NOTIFY_MUTE" ]; then set_mute_state on; else set_mute_state off; fi
+
+    sleep 2
+    echo ""
+    snapshot "AFTER"
+    echo ""
+}
+
+do_modes() {
+    echo ""
+    echo "  ${BOLD}${AQUA}chill — modes${RESET}"
+    echo "  ${GREY}$(printf '┄%.0s' {1..74})${RESET}"
+    echo ""
+    printf "  ${BOLD}%-11s %-12s %-9s %-7s %s${RESET}\n" "MODE" "PROFILE" "PPT(W)" "CLOCK" "USE CASE"
+    echo "  ${GREY}$(printf '┄%.0s' {1..74})${RESET}"
+    printf "  ${RED}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "Palpatine" "performance" "35/65/80" "5.2GHz" "Full power, guns-blazing"
+    printf "  ${ORANGE}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "Malinois" "performance" "35/58/70" "3200" "Strong but cool"
+    printf "  ${BLUE}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "Samwise" "balanced" "28/50/65" "5.2GHz" "Everyday carry"
+    printf "  ${GREY}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "John Wick" "power-saver" "15/25/35" "2000" "Meetings; near-silent"
+    printf "  ${WHITE}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "Let-it-go" "power-saver" "15/25/35" "1800" "Cooldown ASAP; fans MAX"
+    printf "  ${GREEN}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "Treebeard" "power-saver" "15/25/35" "2200" "Max battery; runs warm"
+    printf "  ${YELLOW}${BOLD}%-11s${RESET} ${DIM}%-12s %-9s %-7s %s${RESET}\n" "CP3O" "power-saver" "15/25/35" "1600" "Weak/flaky socket"
+    echo "  ${GREY}$(printf '┄%.0s' {1..74})${RESET}"
+    printf "  ${AQUA}${BOLD}%-11s${RESET} ${DIM}%s${RESET}\n" "status" "Profile + PPT + ceiling + curves + sensors + aliases"
+    printf "  ${AQUA}${BOLD}%-11s${RESET} ${DIM}%s${RESET}\n" "reset" "Balanced + stock curves + default PPT + uncapped"
+    printf "  ${AQUA}${BOLD}%-11s${RESET} ${DIM}%s${RESET}\n" "list" "Show this table"
+    echo ""
+    print_alias_table
+    echo ""
+    echo "  ${DIM}-c, --clock <MHz|max>  override a mode's clock cap, e.g.${RESET} ${AQUA}chill malinois -c 2000${RESET}"
+    echo "  ${DIM}    (clamped to ${CLOCK_MIN_MHZ}–hwmax MHz; 'max' uncaps. Palpatine & Samwise${RESET}"
+    echo "  ${DIM}    boost to 5.2GHz by default; the other modes are clock-capped.)${RESET}"
+    echo "  ${DIM}-n, --rm-notifications silence heat pop-ups, e.g.${RESET} ${AQUA}chill malinois -n${RESET}"
+    echo "  ${DIM}    (or ${RESET}${AQUA}chill -n${RESET}${DIM} alone to mute without touching the hardware. Stays${RESET}"
+    echo "  ${DIM}    muted until any mode or reset runs without -n; prompt temps keep showing.)${RESET}"
+    echo "  ${DIM}High-PPT modes (Palpatine/Malinois) reach full PPT on AC; on battery${RESET}"
+    echo "  ${DIM}the firmware caps them and chill clamps cleanly. PPT writes need sudo.${RESET}"
+    echo ""
+}
+
+usage() {
+    echo ""
+    echo "  ${BOLD}${AQUA}chill${RESET} — thermal/power profiles for ASUS ROG G14"
+    echo ""
+    echo "  ${BOLD}Usage:${RESET}  chill <mode> [-c|--clock <MHz|max>] [-n|--rm-notifications]"
+    echo "          chill status | reset | list"
+    echo "          chill -n                 ${DIM}mute heat pop-ups, mode unchanged${RESET}"
+    echo ""
+    echo "  ${DIM}modes:${RESET} Palpatine Malinois Samwise John-Wick Let-it-go Treebeard CP3O"
+    echo ""
+    echo "  Each mode sets the power profile (via power-profiles-daemon), writes"
+    echo "  CPU+GPU fan curves, sets APU power limits (PPT), and caps the CPU clock"
+    echo "  (except Palpatine). -c/--clock overrides that cap for one run. Names are"
+    echo "  case-insensitive. A before/after snapshot is printed."
+    echo ""
+    do_modes
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────────
+
+# Parse args: first non-flag token is the MODE; -c/--clock <MHz|max> overrides
+# the chosen mode's frequency cap. Flags may appear before or after the mode.
+MODE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -c | --clock)
+        shift
+        CLOCK_OVERRIDE="${1:-}"
+        [ -z "$CLOCK_OVERRIDE" ] && {
+            echo "  ${RED}-c/--clock needs a value (MHz, or 'max')${RESET}"
+            exit 1
+        }
+        ;;
+    -n | --rm-notifications)
+        NOTIFY_MUTE=1
+        ;;
+    *)
+        [ -z "$MODE" ] && MODE="$1"
+        ;;
+    esac
+    shift
+done
+
+# `chill -n` on its own: mute and stop. No mode was named, so touch no hardware —
+# no sudo, no PPT write, no fan curve, no clock cap. Only the marker file moves.
+if [ -z "$MODE" ] && [ -n "$NOTIFY_MUTE" ]; then
+    set_mute_state on || exit 1
+    echo ""
+    echo "  ${YELLOW}${BOLD}Heat notifications muted.${RESET} ${DIM}Thermal mode left alone.${RESET}"
+    echo "  ${DIM}Any mode, or ${RESET}${AQUA}chill reset${RESET}${DIM}, turns them back on.${RESET}"
+    echo "  ${DIM}Prompt temperatures keep updating — only the pop-ups stop.${RESET}"
+    echo ""
+    exit 0
+fi
+
+if [ -z "$MODE" ]; then
+    echo ""
+    echo "  ${YELLOW}${BOLD}No mode specified.${RESET} Pick one:"
+    do_modes
+    echo "  ${DIM}Example:  chill samwise   ·   chill malinois -c 2000${RESET}"
+    echo ""
+    exit 0
+fi
+
+# Validate / clamp the -c override (hard floor + hardware ceiling) so a typo
+# can't make the machine unusable or be silently ignored.
+if [ -n "$CLOCK_OVERRIDE" ] && [ "${CLOCK_OVERRIDE,,}" != "max" ]; then
+    case "$CLOCK_OVERRIDE" in
+    '' | *[!0-9]*)
+        echo "  ${RED}-c/--clock expects an integer in MHz, or 'max'${RESET}"
+        exit 1
+        ;;
+    esac
+    hw_mhz=$(($(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo 5263000) / 1000))
+    if [ "$CLOCK_OVERRIDE" -lt "$CLOCK_MIN_MHZ" ]; then
+        echo "  ${YELLOW}-c ${CLOCK_OVERRIDE} below floor; clamping to ${CLOCK_MIN_MHZ} MHz${RESET}"
+        CLOCK_OVERRIDE="$CLOCK_MIN_MHZ"
+    elif [ "$CLOCK_OVERRIDE" -gt "$hw_mhz" ]; then
+        echo "  ${YELLOW}-c ${CLOCK_OVERRIDE} above hardware max; clamping to ${hw_mhz} MHz${RESET}"
+        CLOCK_OVERRIDE="$hw_mhz"
+    fi
+fi
+[ "${CLOCK_OVERRIDE,,}" = "max" ] && CLOCK_OVERRIDE="max" # normalise casing
+
+# Case-insensitive: Palpatine == palpatine == PALPATINE == PalPatine, etc.
+arg="${MODE,,}"
+
+case "$arg" in
+palpatine) mode_palpatine ;;
+malinois) mode_malinois ;;
+samwise | sam) mode_samwise ;;
+"john wick" | johnwick | john | wick) mode_johnwick ;;
+let-it-go | letitgo | elsa) mode_letitgo ;;
+treebeard | treant) mode_treebeard ;;
+cp3o | c-3po | c3po | sloth | preguica | preguiça) mode_cp3o ;;
+status) do_status ;;
+reset) do_reset ;;
+list | --list | tldr | modes) do_modes ;;
+-h | --help | help) usage ;;
+*)
+    echo "  ${RED}Unknown mode:${RESET} $MODE"
+    do_modes
+    exit 1
+    ;;
+esac

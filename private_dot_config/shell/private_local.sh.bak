@@ -1,0 +1,5 @@
+# Machine-local secrets — NOT tracked by chezmoi
+# Sourced from pass store (GPG-encrypted)
+export BRAVE_API_KEY="$(pass show keys/brave-api 2>/dev/null)"
+export GDRIVE_CLIENT_ID="$(pass show keys/gdrive-client-id 2>/dev/null)"
+export GDRIVE_CLIENT_SECRET="$(pass show keys/gdrive-client-secret 2>/dev/null)"

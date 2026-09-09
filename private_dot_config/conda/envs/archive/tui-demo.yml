@@ -1,0 +1,17 @@
+# tui-demo.yml — archived --from-history export 2026-09-07 (13d.1 script 09); not installed on the desktop by default.
+name: tui-demo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip:
+    - Pygments==2.19.2
+    - linkify-it-py==2.1.0
+    - markdown-it-py==4.0.0
+    - mdit-py-plugins==0.5.0
+    - mdurl==0.1.2
+    - platformdirs==4.9.4
+    - rich==14.3.3
+    - textual==8.1.1
+    - typing_extensions==4.15.0
+    - uc-micro-py==2.0.0

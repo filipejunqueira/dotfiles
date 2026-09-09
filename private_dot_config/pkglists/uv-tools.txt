@@ -1,0 +1,2 @@
+# uv-tools.txt — one tool per line (uv tool list 2026-09-07)
+pingme

@@ -1,0 +1,2 @@
+# pipx.txt — one package per line (pipx.txt 2026-09-07)
+organize-tool

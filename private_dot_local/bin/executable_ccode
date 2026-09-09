@@ -62,6 +62,23 @@ run_claude() {
     local host_cwd="$PWD"
     distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; cd "'"$host_cwd"'" 2>/dev/null && claude '"$(printf ' %q' "$@")"
 }
+render_claude_json() {
+    # 13d.1 script 12: .claude.json comes from a template in dotfiles-private; the Context7 key
+    # lives in pass. Render only when the template is newer than the live file or the file is
+    # absent — Claude Code rewrites .claude.json on exit and that copy must never be clobbered.
+    local tmpl="$HOME/.dotfiles-private/claude/claude.json.template"
+    local out="$HOME/containers/claude-home/.claude.json"
+    [[ -f "$tmpl" ]] || return 0
+    if [[ ! -f "$out" || "$tmpl" -nt "$out" ]]; then
+        local key
+        if ! key="$(pass show api/context7 2>/dev/null)"; then
+            echo -e "${YELLOW}pass show api/context7 failed — .claude.json not rendered${NC}"; return 0
+        fi
+        ( umask 077; sed "s|__CONTEXT7_KEY__|$key|" "$tmpl" > "$out.tmp" ) && mv -f "$out.tmp" "$out"
+        echo -e "${GREEN}Rendered $out from the template${NC}"
+    fi
+}
+
 # ─── Argument parsing ────────────────────────────────────
 ACTION="run"
 CLAUDE_ARGS=()
@@ -78,6 +95,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── Execute ─────────────────────────────────────────────
+render_claude_json
 check_container
 
 case "$ACTION" in

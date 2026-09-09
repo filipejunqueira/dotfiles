@@ -1,0 +1,10 @@
+# mtrx.yml — archived --from-history export 2026-09-07 (13d.1 script 09); not installed on the desktop by default.
+name: mtrx
+channels:
+  - conda-forge
+dependencies:
+  - matplotlib
+  - numpy
+  - python=3.11
+  - pip:
+    - access2theMatrix==0.4.4

@@ -47,7 +47,6 @@ distrobox
 dmidecode
 dmraid
 dnsmasq
-docker
 doggo
 dosfstools
 downgrade
@@ -157,7 +156,6 @@ john
 julia
 kernel-install-for-dracut
 krita
-lazydocker
 lazygit
 less
 lf

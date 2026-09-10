@@ -1,4 +1,6 @@
 # go-tools.txt — go install targets, one per line (gocargo.txt 2026-09-07).
 # scc is NOT here: the AUR package scc covers it; the ~/go/bin copy goes in 13d.13.
-# ASSUMED module path for drift (not checked against a registry on 2026-09-09):
+# drift module path VERIFIED 2026-09-10: proxy.golang.org lists github.com/phlx0/drift with 21
+# versions (latest v1.3.0), and the repo has main.go at its root — cmd/drift is a library
+# package — so the bare module path is the correct install target.
 github.com/phlx0/drift@latest

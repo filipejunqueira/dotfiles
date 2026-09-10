@@ -1,3 +1,9 @@
-# laptop-only.txt — laptop hardware only (installed with native.txt when machine_type = laptop)
+# laptop-only.txt — installed with native.txt only when machine_type = laptop.
 # 2026-09-09: of the plan's set (asusctl, supergfxctl, rog-control-center, fprintd) only asusctl is installed
 asusctl
+# 2026-09-10 (D10): docker and lazydocker moved here from native.txt. podman is the container
+# engine on both machines; docker exists on the laptop solely for awesome-latex, which runs
+# texlive/texlive:TL2023-historic. 13d.7 switches that to prefer podman, after which docker
+# can leave the laptop too (13d.13).
+docker
+lazydocker

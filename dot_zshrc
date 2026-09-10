@@ -57,6 +57,8 @@ fi
 unset __mamba_setup
 # <<< mamba initialize <<<
 
-source /home/filipejunqueira/.config/broot/launcher/bash/br
+# broot 1.55+ stopped generating this launcher; plugins/broot.sh already defines br. The file
+# exists on the laptop from an older broot and nowhere else, so it is sourced only if present.
+[[ -f "$HOME/.config/broot/launcher/bash/br" ]] && source "$HOME/.config/broot/launcher/bash/br"
 
 [ -f "/home/filipejunqueira/.ghcup/env" ] && . "/home/filipejunqueira/.ghcup/env" # ghcup-env

@@ -1,0 +1,7 @@
+# ~/.zshenv — read by EVERY zsh, interactive or not, login or not.
+# The ccinit PATH entry lives here rather than in .zshrc so that non-interactive
+# shells (scripts, Claude Code's own tool calls) can find it too.
+# typeset -U keeps the array unique, so nested shells cannot duplicate entries —
+# which also collapses the duplicates already in PATH.
+typeset -U path PATH
+path=("$HOME/.claude/bin" $path)

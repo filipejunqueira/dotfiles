@@ -5,3 +5,8 @@
 # which also collapses the duplicates already in PATH.
 typeset -U path PATH
 path=("$HOME/.claude/bin" $path)
+# ~/.npm-global/bin holds globally installed node CLIs (gws, playwright-cli).
+# It sits here rather than in .zshrc for the same reason as the line above:
+# non-interactive shells never read .zshrc, so scripts and Claude Code could
+# not find them.
+path=("$HOME/.npm-global/bin" $path)

@@ -17,6 +17,7 @@
 .local/bin/compilebench.sh
 .local/bin/lid-sound-monitor.sh
 .local/bin/backup-catchup
+.local/bin/claude-teams
 {{- end }}
 
 # Claude Code project files and caches inside ~/.local/bin — never managed (D8, revised 2026-09-08)

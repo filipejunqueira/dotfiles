@@ -12,7 +12,7 @@ NC='\033[0m'
 
 # ─── Functions ───────────────────────────────────────────
 usage() {
-    cat << EOF
+    cat <<EOF
 Usage: cc [OPTIONS] [-- claude-args...]
 
 Sandboxed Claude Code launcher.
@@ -21,27 +21,31 @@ Options:
   -u, --update        Update Claude Code inside the container
   -l, --login         Run claude login (OAuth via browser)
   -e, --enter         Enter the container shell (no Claude Code)
+  -f, --fleet         Open the session roster (FleetView) instead of a new session
+  -n, --new           Force a brand-new session — the DEFAULT; kept for habit
   -h, --help          Show this help
 
+
 Examples:
-  cc                  Launch Claude Code in current directory
+  cc                  New session in the current directory
+  cc -f               Pick from running sessions instead
   cc -u               Update Claude Code to latest
   cc -l               Re-authenticate via browser
   cc -e               Drop into container shell
   cc -- --resume      Pass flags through to claude
+
 EOF
 }
 
 check_container() {
     local _list
     _list="$(distrobox list)"
-    if ! grep -q "$CONTAINER_NAME" <<< "$_list"; then
+    if ! grep -q "$CONTAINER_NAME" <<<"$_list"; then
         echo -e "${RED}Container '$CONTAINER_NAME' not found.${NC}"
         echo "Create it first (see setup guide)."
         exit 1
     fi
 }
-
 
 enter_shell() {
     distrobox enter "$CONTAINER_NAME"
@@ -60,8 +64,24 @@ run_login() {
 
 run_claude() {
     local host_cwd="$PWD"
-    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; cd "'"$host_cwd"'" 2>/dev/null && claude '"$(printf ' %q' "$@")"
+    local -a args=()
+    # A passthrough that already picks a session wins. `--session-id <new>` alongside
+    # --resume or --continue is a contradiction, so do not inject one on top of them.
+    local a picks_session=0
+    for a in "$@"; do
+        case "$a" in
+        -r | --resume | -c | --continue | --session-id | --fork-session) picks_session=1 ;;
+        esac
+    done
+    ((NEW_SESSION && !picks_session)) && args+=(--session-id "$(uuidgen)")
+    args+=("$@")
+    # `printf ' %q'` with an empty array still prints once, against an empty string, so an
+    # unguarded expansion hands claude a stray '' — an empty prompt on every bare `cc`.
+    local cmd="claude"
+    ((${#args[@]})) && cmd+="$(printf ' %q' "${args[@]}")"
+    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; cd "'"$host_cwd"'" 2>/dev/null && '"$cmd"
 }
+
 render_claude_json() {
     # 13d.1 script 12: .claude.json comes from a template in dotfiles-private; the Context7 key
     # lives in pass. Render only when the template is newer than the live file or the file is
@@ -72,25 +92,63 @@ render_claude_json() {
     if [[ ! -f "$out" || "$tmpl" -nt "$out" ]]; then
         local key
         if ! key="$(pass show api/context7 2>/dev/null)"; then
-            echo -e "${YELLOW}pass show api/context7 failed — .claude.json not rendered${NC}"; return 0
+            echo -e "${YELLOW}pass show api/context7 failed — .claude.json not rendered${NC}"
+            return 0
         fi
-        ( umask 077; sed "s|__CONTEXT7_KEY__|$key|" "$tmpl" > "$out.tmp" ) && mv -f "$out.tmp" "$out"
+        (
+            umask 077
+            sed "s|__CONTEXT7_KEY__|$key|" "$tmpl" >"$out.tmp"
+        ) && mv -f "$out.tmp" "$out"
         echo -e "${GREEN}Rendered $out from the template${NC}"
     fi
 }
 
 # ─── Argument parsing ────────────────────────────────────
 ACTION="run"
+# A FRESH SESSION IS THE DEFAULT. Launching with no session id lands in FleetView, the
+# roster of running sessions, which is the rarer thing to want and was reachable only by
+# accident before: an empty '' argument used to suppress it, and removing that stray
+# argument on 2026-09-20 exposed the picker on every bare `cc`. -f asks for it on purpose.
+NEW_SESSION=1
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -u|--update)      ACTION="update"; shift ;;
-        -l|--login)       ACTION="login"; shift ;;
-        -e|--enter)       ACTION="enter"; shift ;;
-        -h|--help)        usage; exit 0 ;;
-        --)               shift; CLAUDE_ARGS=("$@"); break ;;
-        *)                CLAUDE_ARGS+=("$1"); shift ;;
+    -u | --update)
+        ACTION="update"
+        shift
+        ;;
+    -l | --login)
+        ACTION="login"
+        shift
+        ;;
+    -e | --enter)
+        ACTION="enter"
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --)
+        shift
+        CLAUDE_ARGS=("$@")
+        break
+        ;;
+    -n | --new)
+        NEW_SESSION=1
+        shift
+        ;;
+    -f | --fleet)
+        # NOT -p: claude's own -p/--print is far too common to shadow. `cc -- -p '...'`
+        # must keep meaning claude's print flag.
+        NEW_SESSION=0
+        shift
+        ;;
+    *)
+        CLAUDE_ARGS+=("$1")
+        shift
+        ;;
     esac
 done
 
@@ -99,8 +157,8 @@ render_claude_json
 check_container
 
 case "$ACTION" in
-    update) update_claude ;;
-    login)  run_login ;;
-    enter)  enter_shell ;;
-    run)    run_claude "${CLAUDE_ARGS[@]}" ;;
+update) update_claude ;;
+login) run_login ;;
+enter) enter_shell ;;
+run) run_claude "${CLAUDE_ARGS[@]}" ;;
 esac

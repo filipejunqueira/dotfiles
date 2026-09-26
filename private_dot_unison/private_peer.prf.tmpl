@@ -1,0 +1,182 @@
+# peer.prf — the unison profile for the four document lanes (phase 13d.11, design in
+# desktop_parity_plan.md §5, decisions D1 and D5).
+#
+# chezmoi TEMPLATE: private_dot_unison/private_peer.prf.tmpl  ->  ~/.unison/peer.prf
+# CORRECTED 2026-09-15, and the old wording here said "only". unison 2.54.0 reads a profile from
+# ~/.unison/ BY DEFAULT, and the UNISON environment variable overrides that directory. Measured:
+# with UNISON pointing at a directory holding probe.prf, `unison probe -testserver` prints
+# "Contacting server..."; with UNISON pointing at an empty directory the same command prints the
+# usage banner. So the practical point stands unchanged — a `.config` path is never read, which is
+# what Critical finding C1 was about — but "only" was wrong, and the round trip in post_13d11.sh
+# depends on the override being real, so the two statements have to agree.
+# Decision D-C1 chose the default directory over setting UNISON in the shell, and that still
+# holds: a UNISON exported for hsync but not for a hand-typed `unison peer -auto` would give the
+# two invocations different archive sets, and the second would see no archive and resurrect
+# deletions.
+# (the old
+# comment here named a `.config`-tree path unison never looks in)
+#
+# The SAME file name on BOTH machines, not desktop.prf here and laptop.prf there. A chezmoi
+# source file has one fixed target name, so a per-machine filename would need a mechanism this
+# dotfiles source does not use, while the roots below template cleanly off .machine_type. The
+# happy consequence is that `unison peer` means the same thing typed on either machine.
+#
+# Run it INTERACTIVELY:  unison peer -auto
+# `-auto` takes the default action for everything that is not a conflict and still asks on every
+# conflict, so the first run — about 50 GB laptop to desktop — is one keypress rather than
+# thousands. Never -batch and never -force: PLAN.md's invariant list, and the reason is that
+# these four directories are the only copy of some of what is in them.
+#
+# ONE WARNING BEFORE ANYTHING BELOW, and it changes how every other line here should be read:
+# unison SILENTLY IGNORES an option name it does not recognise. A misspelt name on the left of an
+# `=` is not an error, it is a setting that quietly does not apply, and unison never mentions it.
+# The measurement is written out in full in the backups section at the bottom of this file.
+#
+# What a single mistyped name would cost, line by line. This is reasoning from what each option
+# does, not a second measurement, so read it as ASSUMED except where it says otherwise:
+#   ignore     the D5 exclusion stops applying, and 515 MB of irreplaceable beamline data gets
+#              copied onto the laptop on the next run, without a word.
+#   backup, backuploc, backupdir, maxbackups
+#              no recoverable copy of anything unison replaces or deletes. The whole of H3 is
+#              undone and the sync looks entirely normal while it happens.
+#   path       ONE mistyped `path` line quietly drops that one lane from the sync while the other
+#              three still limit the run. That is the realistic case and the nastier one, because
+#              nothing about the run looks wrong. Lose ALL FOUR — a rename, a careless
+#              search-and-replace — and nothing limits the run at all: the root is the whole of
+#              /home/filipejunqueira, so the profile is pointed at the entire home directory. Same
+#              shape as the `unison -path` trap in CLAUDE.md's corrections log: a line that looks
+#              like it narrows the run.
+#   times      modification times stop being propagated. Cosmetic, and visible.
+#   confirmbigdel
+#              nothing changes, because true is already the default.
+#   root       probably the one that would not stay quiet, since a profile with no roots has
+#              nothing to sync at all — but that was not tested either.
+#
+# And there is nothing anyone can run beforehand that would catch any of it. `-testserver` returns 0
+# on a profile with a bogus option name (VERIFIED). `post_13d11.sh` only checks that this file
+# exists, and says so itself at its line 530 — the round trip never names a profile, so it does not
+# exercise this file at all. What was measured on 2026-09-15 is narrower than "nothing reads it"
+# and is enough: of every shell script under `pending/` and `tests/`, not one reads an option name
+# out of this file. Some of them copy it about; none looks inside it. So the ONLY proof that a line
+# here does what it says is watching unison behave — the two ignore lines were proved that way,
+# against two throwaway local replicas, and everything else waits for the real run at PLAN.md
+# step 18b.
+
+# ── roots ───────────────────────────────────────────────────────────────────────────────────────
+# The local root is written out rather than left as ~ so that it is the same string whatever shell
+# or service invokes unison. Both machines are uid 1000 with /home/filipejunqueira.
+root = /home/filipejunqueira
+root = ssh://{{ if eq .machine_type "laptop" }}desktop{{ else }}laptop{{ end }}//home/filipejunqueira
+# The double slash after the host is unison's syntax for an absolute remote path, not a typo.
+# `desktop` and `laptop` are Host entries in the shared dotfiles-private ssh config (D7).
+
+# ── the four lanes ──────────────────────────────────────────────────────────────────────────────
+# Anything not named here is outside the profile entirely: ~/code is git's, the dotfiles are
+# chezmoi's, and the big data (~/blender_files, ~/audio, ~/music, ~/videos) is desktop-only or
+# laptop-only on purpose and has no lane at all.
+path = documents
+# career is ONE-SIDED today and the warning used to sit 72 lines below this, inside a paragraph
+# about backups (step 31, G9 site 9, 2026-09-20). The desktop has no ~/career and no ~/inbox at
+# all, so the first `unison peer -auto` copies them laptop to desktop in full — part of the roughly
+# 50 GB named at the top of this file. That is intended, not a conflict; it is said here because
+# this is the line a reader meets.
+path = career
+path = research
+path = inbox
+
+# ── what never travels ──────────────────────────────────────────────────────────────────────────
+ignore = Name .git
+# The two patterns below were watched working on 2026-09-15 rather than read off the manual: two
+# local replicas, unison's own state pinned to a scratch directory, files planted on one side only
+# (log pending/13d.11/logs/desktop_state_20260915-221542.log, section `== U-3`). A `.tmp` file and
+# a `~` file were both left alone, so the brace alternation `{*.tmp,*~}` IS understood by 2.54.0
+# inside a Name pattern — do not "tidy" it into two separate ignore lines. Of everything planted,
+# only the one plain `.txt` file was proposed, and nothing was propagated. The `.git` line above
+# was not part of that test.
+ignore = Name {*.tmp,*~}
+
+# D5. ~/research/i09-jan-2023-data is 515 MB of beamline data that row 10.5 put on the DESKTOP,
+# and it is irreplaceable. It has no business being copied onto the laptop, and a lane that
+# quietly does it once is a lane that can quietly undo it later. Ignoring the path by name is the
+# cheapest way to say so. If it ever should sync, that is a decision with a date on it, not an
+# edit in passing.
+# The same 2026-09-15 test planted a file inside that directory AFTER the profile was written, and
+# unison still ignored it — so the Path form covers what appears later, not only what was there
+# when the line was added.
+ignore = Path research/i09-jan-2023-data
+
+# ── behaviour ───────────────────────────────────────────────────────────────────────────────────
+# Modification times are propagated, so the two sides stop looking different to every tool that
+# reads an mtime — rsync previews, backup selectors, `ls -t`.
+times = true
+
+# ── backups (H3) ────────────────────────────────────────────────────────────────────────────────
+# No `backup` line meant no recoverable copy of anything unison replaced or deleted, over lanes
+# the file itself calls the only copy of some of what is in them. `backup = Name *` backs up every
+# file; `backuploc = central` (the spelling `unison -help` actually names) sends them to
+# `backupdir` instead of sitting next to the original. Every option name in this profile — root,
+# path, ignore, times, backup, backuploc, backupdir, maxbackups, confirmbigdel — was checked
+# against the installed 2.54.0 binary's own `-help` on 2026-09-15, and every one of them is there
+# (log pending/13d.11/logs/desktop_state_20260915-221542.log, section `== U-1`). `backuplocation`,
+# the spelling the man page's PROSE uses, is not.
+#
+# AND UNISON SAYS NOTHING WHEN A NAME IS WRONG. Measured the same day (same log, section `== U-2`):
+# a copy of this profile with `backuploc` changed to `backuplocation` ran all the way to "Nothing
+# to do" — no error, no warning, no mention of the unknown key. Unison ignored the line and used
+# its default instead. `-testserver` on that same broken profile returned 0, so `-testserver`
+# proves the CONNECTION and never the profile. No gate this project owns would catch a typo in an
+# option name here. The only proof that a line in this file does what it says is watching a real
+# sync behave, at PLAN.md step 18b.
+#
+# `backupdir` is `~/.unison-backups`, a sibling of the four synced lanes directly under root, not
+# inside documents, career, research or inbox — none of the `path =` lines above name it, so unison
+# never walks into it and the backups cannot be synced into themselves. `maxbackups` keeps the last
+# 3 generations of a file (default is 2).
+#
+# ONE ABSOLUTE PATH, BUT TWO DIRECTORIES. `backupdir` is a literal string and the same string is
+# rendered into both machines' copies of this profile. It does not mean "whichever home this side
+# has"; it happens to be right on both only because both machines are uid 1000 with a home at
+# /home/filipejunqueira. A backup is written on the side where the file was overwritten, so after a
+# while there are two of these directories holding different things — the laptop's holds what the
+# laptop lost, the desktop's holds what the desktop lost. Neither is a copy of the other, and
+# looking in one does not tell you what happened on the other. ASSUMED, not measured: `-help` says
+# only that `backuploc = central` decides "where backups are stored" and says nothing about which
+# replica stores them. The way to settle it is to look on both machines after the first run that
+# actually replaces a file.
+#
+# THAT DIRECTORY DOES NOT EXIST YET, and no script in this batch creates it. Both machines were
+# checked on 2026-09-15 and both said ABSENT (same log, sections `== c1` for the desktop and
+# `== L-b` for the laptop). Unison itself is what makes it, and it makes one on EACH machine,
+# since this same profile is rendered to both. ASSUMED, not measured: that unison creates the
+# directory when it needs it rather than failing for want of somewhere to put a backup.
+#
+# WHEN it first appears is probably NOT the first sync. `backup = Name *` backs up what unison
+# REPLACES or DELETES, and the first run is overwhelmingly new files arriving on the desktop: it
+# has no ~/inbox and no ~/career at all, and about 50 GB moves laptop to desktop. A new file
+# replaces nothing, so it produces no backup. Expect this directory to be empty or nearly empty
+# after the big first run, and to fill over the ordinary runs afterwards, as the same files get
+# edited on one side and overwritten on the other.
+#
+# Those later runs are where the unbounded growth is, and it is the one write in 13d.11 with no
+# ceiling. `maxbackups = 3` caps each individual FILE at three old generations; it caps nothing
+# about the directory. Across four lanes holding roughly 50 GB, the more files that get edited over
+# time, the more files have three old copies sitting in here, and nothing in this profile or
+# anywhere in 13d.11 ever prunes them. `post_13d11.sh`'s header carries the same fact, so a reader
+# finds it from either direction.
+backup = Name *
+backuploc = central
+backupdir = /home/filipejunqueira/.unison-backups
+maxbackups = 3
+
+# confirmbigdel defaults to true, but the review found the POST hitting it as a surprise; this
+# line just says so. What it does depends on HOW unison is run, which the old wording here flattened
+# into "aborts" — `unison -doc confirmbigdel`, read 2026-09-15: "Unison will request an extra
+# confirmation if it appears that the entire replica has been deleted, before propagating the
+# change. If the batch flag is also set, synchronization will be aborted." So under the documented
+# `unison peer -auto` it ASKS, and only under `-batch` does it abort. That is exactly why
+# post_13d11.sh's round trip passes `-confirmbigdel=false`: it IS a `-batch` call, over two
+# throwaway roots, and an abort there would stop the deletion leg the check exists to prove. The
+# doc also notes the flag affects the text interface only. It stops a sync that would empty an
+# entire path root on one replica, rather
+# than treating a whole-lane wipe as an ordinary delete.
+confirmbigdel = true

@@ -1,0 +1,1074 @@
+#!/usr/bin/env bash
+# hsync — one sync tool, four entry points (desktop_parity_plan.md §5, phase 13d.11).
+#
+#   hsync              in a directory: what state this lane is in, a numbered menu, one action
+#   hsync --all        every lane, status table only, nothing is changed
+#   hsync --leave      all lanes, no menu — stops if any lane is dirty, DIVERGED, drifted or
+#                      unreachable. Those four are STATE_STOP below; this line named only the
+#                      first until 2026-09-15 and usage() named three of the four (review S2-5).
+#                      The git half is push-only; the document half is `unison -auto`, TWO-WAY
+#   hsync --arrive     all lanes, PULL direction — wakes the peer first when it is the desktop.
+#                      Its document half is `unison -auto` too, so that half is TWO-WAY as well
+#
+# The name is `hsync`, not `sync`, by decision D3: ~/.local/bin is ahead of /usr/bin on PATH on
+# both machines and ~/.local/bin/herdr calls a bare `sync`, so a file named `sync` there would
+# shadow coreutils' for every shell and everything started from one.
+#
+# This file is a chezmoi TEMPLATE: private_dot_local/bin/executable_hsync.tmpl → ~/.local/bin/hsync
+# on both machines. PEER is the ONE templated value. It goes into the PUBLIC `dotfiles`
+# repository, so it holds no address, no MAC and no key material — `--arrive` reads the two wake
+# values from ~/.config/hsync/peer.env at run time (decision D10).
+#
+# Never, on any path: `git push --force`, `chezmoi apply` over drift that has not been printed,
+# `unison -force`, `unison -batch` outside the one read-only `-testserver` call, or any `--delete`.
+# Read-only means read-only: `hsync --all` and every `status` path below run no fetch, no apply,
+# no propagation.
+set -uo pipefail
+
+# The peer's ssh alias. Both `desktop` and `laptop` are Host entries in the shared
+# dotfiles-private ssh config (decision D7), so this is a name ssh, rsync, up, down and unison all
+# resolve the same way. Rendered by chezmoi from .machine_type, which already exists in
+# ~/.config/chezmoi/chezmoi.toml on both machines — no hostname test of this script's own.
+PEER='{{ if eq .machine_type "laptop" }}desktop{{ else }}laptop{{ end }}'
+# The `else` branch of the line above is a CATCH-ALL, not a test (review S2-10). On any machine
+# whose .machine_type is neither `laptop` nor `desktop` it renders `laptop`, a valid-looking
+# answer: peer.prf's roots would point at ssh://laptop, `manifest_report` would call this machine
+# `desktop`, and a sync could run in the wrong direction between the wrong pair. Measured
+# 2026-09-15: the laptop's ~/.config/chezmoi/chezmoi.toml sets `machine_type = "laptop"` and the
+# desktop's `chezmoi data` reports `desktop`, so both real machines are right today. This guard is
+# for the third machine, and it refuses rather than guesses — there is no safe default for "which
+# machine is my peer".
+case "$PEER" in
+  desktop|laptop) : ;;
+  *[{}]*)
+    echo "hsync: this copy has not been rendered by chezmoi — PEER still holds template text." >&2
+    echo "hsync: run 'chezmoi apply ~/.local/bin/hsync' and use the rendered copy." >&2
+    exit 2 ;;
+  *)
+    echo "hsync: PEER rendered to '$PEER', which is neither 'desktop' nor 'laptop'." >&2
+    echo "hsync: this tool is a two-machine pair and has no answer for a third machine." >&2
+    echo "hsync: set machine_type in ~/.config/chezmoi/chezmoi.toml, or do not use hsync here." >&2
+    exit 2 ;;
+esac
+
+# An ssh login shell inherits no SSH_AUTH_SOCK: the gnome-keyring agent belongs to the graphical
+# session. Filipe drives this from a phone, through Termux over Tailscale, and his key is
+# passphrase-protected — so without this every single command below dies instantly with
+# "Permission denied (publickey)" while `ssh -v` shows the server ACCEPTING the key. Same
+# adoption, same guards, as pending/13d.2/lib.sh does for the batch scripts: only when the shell
+# exported none, and only a socket this user owns.
+_hs_sock="/run/user/$(id -u)/gcr/ssh"
+if [ -z "${SSH_AUTH_SOCK:-}" ] && [ -S "$_hs_sock" ] && [ -O "$_hs_sock" ]; then
+  SSH_AUTH_SOCK="$_hs_sock"
+  export SSH_AUTH_SOCK
+  HS_AGENT_ADOPTED=yes
+fi
+unset _hs_sock
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# 1. DATA — the lane table, the status record, and the two files
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+# LANES — one row per rule, `path|kind|engine`, in PRECEDENCE order: the first row whose path
+# matches wins. `@chezmoi` is not a glob; it is the row that asks chezmoi whether it manages the
+# path, which is the only way to answer that question truthfully. The last row is the catch-all.
+#
+# Read this table before changing anything else in this file. Every other function takes its
+# behaviour from it: classify walks it, --all enumerates from it, and a new lane is a new row
+# here rather than a new branch somewhere below.
+LANES=(
+  "$HOME/code/*|code|git"
+  # Above the catch-all on purpose (review S2-2). status() reads this directory out of D9_EXEMPT
+  # and calls it `code git`; classify, which walks this table, used to fall through to the
+  # catch-all and call it `plain plain` — so `hsync` typed inside ~/containers/claude-home/.claude
+  # offered to rsync the whole Claude state tree to the peer. One directory, two answers, because
+  # only one of the two sites read the table. A row here makes them agree the way the table says
+  # they should, and costs nothing: status() skips non-unison rows in its LANES loop, so this does
+  # not put a second copy of the lane in the table.
+  "$HOME/containers/claude-home/.claude|code|git"
+  "@chezmoi|dotfiles|chezmoi"
+  "$HOME/documents|documents|unison"
+  "$HOME/career|documents|unison"
+  "$HOME/research|documents|unison"
+  "$HOME/inbox|documents|unison"
+  "*|plain|plain"
+)
+
+# THE STATUS RECORD — one line per lane, four fields, `name|kind|state|detail`.
+#   name    the lane, with $HOME written as ~
+#   kind    the second field of its LANES row: code, dotfiles, documents, plain
+#   state   ONE word, from this closed set:
+#             clean       nothing to do
+#             dirty       uncommitted changes in a git lane
+#             ahead       commits here that the remote does not have
+#             behind      commits on the remote that are not here
+#             diverged    both, so neither a push nor a fast-forward pull will do
+#             drift       chezmoi's targets and source disagree — OR chezmoi could not be asked
+#                         at all, which is not the same as agreeing (see chezmoi_state)
+#             no-remote   a git lane with no upstream branch
+#             no-git      a directory under ~/code that is not a repository
+#             missing     the directory is not there
+#             unreachable the peer did not answer, so nothing about it can be said
+#             ok          a unison or plain lane whose peer answers (nothing is claimed about
+#                         its contents unless --deep asked for the preview)
+#   detail  free text, including the D9 note where it applies
+# STATE_STOP below is the subset that stops `--leave`: the states where pushing would either lose
+# something or is impossible. `no-git` and `missing` are deliberately NOT in it — ~/code still
+# holds two dozen directories that are not repositories (that is phase 13d.14's whole job), and
+# ~/career and ~/inbox do not exist on the desktop until the first unison run creates them. A
+# --leave that refused to run until 13d.14 finished would simply never be used, and a gate nobody
+# can satisfy teaches people to ignore it. Both states are still printed in the table.
+STATE_STOP="dirty diverged drift unreachable"
+
+# D9 — the two standing exceptions. They carry live work unrelated to the migration, so "zero
+# dirty repositories" means zero OUTSIDE this list. They are MARKED in the table, never hidden:
+# a lane that is exempt still prints its real state word and its detail says why it does not
+# count. Add to this list only with a decision to quote.
+D9_EXEMPT=(
+  "$HOME/containers/claude-home/.claude"
+  "$HOME/code/internet-speed"
+)
+
+# THE TWO FILES.
+#   peer.prf — the unison profile, chezmoi-managed, the same NAME on both machines with the roots
+#              templated (a chezmoi source file has one fixed target name). It carries D5's
+#              ignore for research/i09-jan-2023-data. hsync never writes it.
+#              It lives in ~/.unison/ and nowhere else, because that is the ONLY directory
+#              unison 2.54.0 searches for a profile (measured 2026-09-14: the same file under
+#              the XDG config directory yields unison's usage banner and no connection, and
+#              setting XDG_CONFIG_HOME does not help — `unison -doc running` says "In Unix,
+#              the default is to use $HOME/.unison"). ~/.unison is also where unison keeps its
+#              archives, so hsync and a hand-typed `unison peer -auto` share one archive set.
+#   peer.env — the two wake values, mode 600, NOT chezmoi-managed and never committed, because
+#              this file is public and they are not. Absent on the desktop by design: the desktop
+#              never needs to wake the laptop.
+UNISON_PROFILE="peer"
+PEER_PRF="$HOME/.unison/$UNISON_PROFILE.prf"
+PEER_ENV="$HOME/.config/hsync/peer.env"
+WOL_TIMEOUT=300          # the same bound /usr/local/bin/backup-home.sh uses for the same wait
+WOL_STEP=10              # and the same polling interval
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
+
+# Counters the status table fills in and the summary line reports.
+N_LANES=0; N_DRIFT=0; N_DIRTY=0; N_EXEMPT=0; N_UNREACH=0; N_STOP=0
+DEEP=0                   # --deep turns on the rsync preview for unison and plain lanes
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# 2. THE INTERFACE — every function this tool has, and what it promises
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+#
+#   classify <path>            -> `kind|engine|root`   on stdout. Never writes, never connects.
+#                                 Returns 3, with a message on stderr and nothing on stdout, for
+#                                 the three roots D-H2 refuses: $HOME, $HOME/code and the chezmoi
+#                                 source. Every caller must read the status — a refusal is not an
+#                                 empty record, it is "do not go on".
+#   status   [<path>]          -> one `name|kind|state|detail` record per lane on stdout, and the
+#                                 counters above updated. With a path, that path's lane only; with
+#                                 none, every lane. READ-ONLY: no fetch, no apply, no propagation.
+#   act <lane-root> <action>   -> runs exactly one of push-git pull-git push-files pull-files
+#                                 chezmoi-readd chezmoi-update unison-sync. Returns the command's
+#                                 own status. The underlying tools keep their OWN confirmations:
+#                                 up and down ask "Are you sure? [Y/N]", unison -auto asks on
+#                                 every conflict, chezmoi-update asks before it applies. hsync
+#                                 never answers those for you.
+#   wake_peer                  -> one wake-on-LAN packet pair to the peer, from peer.env. 0 sent,
+#                                 1 not applicable (the peer is not the desktop), 2 cannot (no
+#                                 peer.env, no values, no wol). Prints neither value, ever.
+#   wait_peer <seconds>        -> 0 as soon as the peer answers ssh, 1 when the bound is reached.
+#
+# Everything else in this file is an entry point or a two-line helper used by more than one of
+# the five. A helper that would be called once is written where it is used.
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# 3. THE BODIES
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+die()  { echo "hsync: $*" >&2; exit 2; }
+note() { echo "hsync: $*"; }
+tilde() { case "$1" in "$HOME") echo '~' ;; "$HOME"/*) echo "~${1#"$HOME"}" ;; *) echo "$1" ;; esac; }
+# ssh keeps the FIRST value it is given for an option, so the shorter timeout has to come before
+# SSH_OPTS' ConnectTimeout=8, not after it, or it is a dead argument. This one is asked often.
+peer_up() { ssh -n -o ConnectTimeout=5 "${SSH_OPTS[@]}" "$PEER" true >/dev/null 2>&1; }
+# `-ef`, not `=` (review S2-7). classify refuses its three roots with -ef precisely because
+# /run/host/home/filipejunqueira is a BIND MOUNT of the same directory that neither `pwd -P` nor
+# `readlink -f` rewrites — and this function was still comparing strings, so the same directory
+# reached by that route was NOT exempt while classify would have recognised it. -ef compares
+# device and inode, so it also absorbs a trailing slash, a `.`/`..` and a symlinked route. The
+# `[ -e ]` guards first: -ef on a path that does not exist is false, and D9_EXEMPT may name a
+# directory this machine does not have.
+is_exempt() {
+  local p=$1 e
+  [ -e "$p" ] || return 1
+  for e in "${D9_EXEMPT[@]}"; do [ -e "$e" ] && [ "$p" -ef "$e" ] && return 0; done
+  return 1
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ── classify ────────────────────────────────────────────────────────────────────────────────────
+# The lane ROOT is what matters: a status or an action inside ~/code/sci/src is about ~/code/sci,
+# and one inside ~/documents/lev is about the ~/documents lane. For a `<dir>/*` row the root is
+# the matched child; for a fixed row it is the row's own path; for the catch-all it is the path
+# itself.
+classify() {
+  local p=${1:-$PWD} abs row pat rest kind engine base rel root
+  abs=$(cd "$p" 2>/dev/null && pwd -P) || abs=$p
+  # STEP 51. When that `cd` fails — the path does not exist, or is a file, or is a typo — `abs`
+  # keeps whatever was passed, and a RELATIVE argument stays relative. The ancestor walk below
+  # shortens with `${anc%/*}`, which returns a slash-less string UNCHANGED, so `anc` never
+  # reaches `/`, the `[ "$anc" = / ]` break never fires and `while :` spins forever, forking
+  # `chezmoi source-path` on every pass. Measured 2026-09-21: `hsync no-such-dir`,
+  # `hsync afile.txt` and `hsync a/b/c` all rc=124 under `timeout 5`; rc=0 before step 40.
+  case $abs in /*) ;; *) abs=$PWD/$abs ;; esac
+  # D-H2 — three roots the catch-all row would otherwise offer as an ad-hoc rsync lane: the whole
+  # home, the directory that HOLDS the repositories, and the chezmoi source. Each gets a refusal
+  # naming the command that is right for it. The comparison is `-ef` (same device and inode), not
+  # string equality, because /run/host/home/filipejunqueira is a bind mount of the same directory
+  # and neither `pwd -P` nor `readlink -f` rewrites it (measured 2026-09-14).
+  # `return 3`, NOT `die`: every caller reads classify through $( ), and an exit inside a command
+  # substitution kills only the subshell — the menu would print anyway. The callers check.
+  local cm_src=""
+  have chezmoi && cm_src=$(chezmoi source-path 2>/dev/null) || cm_src=""
+  [ -n "$cm_src" ] || cm_src="$HOME/.local/share/chezmoi"
+  if [ "$abs" -ef "$HOME" ]; then
+    echo "hsync: $(tilde "$abs") is your whole home, not a lane. Use 'hsync --all', or run hsync inside the lane you mean." >&2; return 3
+  elif [ "$abs" -ef "$HOME/code" ]; then
+    echo "hsync: $(tilde "$abs") holds the repositories but is not itself a lane. Use 'hsync --all', or run hsync inside one repository." >&2; return 3
+  elif [ -d "$cm_src" ] && [ "$abs" -ef "$cm_src" ]; then
+    echo "hsync: $(tilde "$abs") is the chezmoi SOURCE, not a lane. Use 'chezmoi diff' then 'chezmoi apply', or run hsync in a managed directory." >&2; return 3
+  fi
+  # STEP 40. The rows used to be matched by STRING against a logical `pwd`, while the three
+  # refusals just above and `is_exempt` both use `-ef`. One directory therefore got two answers
+  # depending on the route taken to it, and the wrong answer was the dangerous one: a miss falls to
+  # the catch-all as `plain`, and a `plain` lane is offered as a raw rsync with NO exclusions at
+  # all — on ~/research that is the D5-protected 515 MB.
+  # TWO ROUTES DO THIS, and only one of them needs a symlink. `~/docs -> ~/documents` is the
+  # obvious one. The live one is `/run/host/home/filipejunqueira/documents`, a bind mount of the
+  # same directory: MEASURED 2026-09-19, `pwd` and `pwd -P` both print that path unchanged and
+  # `-ef` says it is ~/documents. So no amount of string normalisation can close this — `pwd -P`
+  # alone fixes the symlink and leaves the bind mount — and the comparison has to be device and
+  # inode, like everything else in this function.
+  # THE WALK. From the path upwards: a fixed row hits when the ancestor IS the row (`-ef`), and a
+  # `<dir>/*` row hits when the ancestor's PARENT is the row's base, in which case the ancestor is
+  # the lane root. The innermost ancestor wins and row order is preserved within a level, which is
+  # what the comment at the head of LANES has always claimed. `@chezmoi` is tested only on the path
+  # itself, at the position it holds in the table, because `chezmoi source-path` is a process per
+  # call and because a managed file inside a lane classified as dotfiles before this change too.
+  # It stays INLINE rather than becoming a helper: tests/test_fixbatch_13d11.sh section 5 evals
+  # LANES, tilde, have and classify and nothing else, so a helper would read as classify broken.
+  local anc parent up
+  anc=$abs
+  while :; do
+    for row in "${LANES[@]}"; do
+      pat=${row%%|*}; rest=${row#*|}; kind=${rest%%|*}; engine=${rest##*|}
+      case "$pat" in
+        "@chezmoi")
+          [ "$anc" = "$abs" ] || continue
+          have chezmoi || continue
+          chezmoi source-path "$abs" >/dev/null 2>&1 || continue
+          printf '%s|%s|%s\n' "$kind" "$engine" "$abs"
+          return 0 ;;
+        \*) continue ;;
+        */\*)
+          base=${pat%/\*}
+          [ -d "$base" ] || continue
+          [ "$anc" = / ] && continue
+          parent=${anc%/*}; [ -n "$parent" ] || parent=/
+          if [ -e "$parent" ] && [ "$parent" -ef "$base" ]; then
+            printf '%s|%s|%s\n' "$kind" "$engine" "$anc"
+            return 0
+          fi ;;
+        *)
+          # STEP 51. `-ef` compares device and inode, so it needs BOTH paths to exist; the
+          # `[ -d "$pat" ] || continue` that guarded it skipped the whole row when the lane
+          # root was absent, and the path fell through to the catch-all as `plain|plain`.
+          # ~/inbox and ~/career are exactly the two roots the DESKTOP does not have before
+          # its first unison run (peer.prf says so), so `hsync ~/inbox` there offered the raw
+          # rsync menu for a unison lane. When the root is absent there is nothing to compare
+          # inodes with, so fall back to the string equality this used before step 40 — it is
+          # exact, both sides come from the same `$HOME`, and it cannot be fooled by a
+          # symlink, because a symlink would mean the path EXISTS and the `-ef` arm runs.
+          if [ -d "$pat" ]; then
+            if [ -e "$anc" ] && [ "$anc" -ef "$pat" ]; then
+              printf '%s|%s|%s\n' "$kind" "$engine" "$pat"
+              return 0
+            fi
+          elif [ "$anc" = "$pat" ]; then
+            printf '%s|%s|%s\n' "$kind" "$engine" "$pat"
+            return 0
+          fi ;;
+      esac
+    done
+    [ "$anc" = / ] && break
+    # STEP 51. The second guard: if shortening does not shorten, stop. With the `abs` fix
+    # above this is unreachable, and it stays because the cost is one line and the failure it
+    # prevents is an unkillable loop in the tool Filipe types most.
+    up=${anc%/*}; [ -n "$up" ] || up=/
+    [ "$up" = "$anc" ] && break
+    anc=$up
+  done
+  # The catch-all comes from the TABLE, not from a literal here, so the table stays the single
+  # statement of what an unclassified path is. The line below it is what answers if the row is ever
+  # struck out.
+  for row in "${LANES[@]}"; do
+    case "${row%%|*}" in
+      \*) rest=${row#*|}; printf '%s|%s|%s\n' "${rest%%|*}" "${rest##*|}" "$abs"; return 0 ;;
+    esac
+  done
+  printf 'plain|plain|%s\n' "$abs"
+}
+
+# ── the three state readers, one per engine ─────────────────────────────────────────────────────
+# Each prints `state|detail`. None of them writes anything or reaches the network except where
+# it says so.
+
+# git_state — deliberately does NOT fetch. A fetch writes remote refs into .git and takes as long
+# as the link is slow, and `hsync --all` walks every repository under ~/code; a status command
+# that quietly rewrites state and takes a minute is not a status command. So ahead/behind are
+# read against the upstream ref as it already stands, and the detail says so when it matters.
+git_state() {
+  local r=$1 dirty up counts behind ahead top
+  # 2026-09-26: `--git-dir` alone also succeeds for a folder INSIDE some other repository. The
+  # laptop audit found an empty `~/code/.git` (a bare `git init`) that made every non-git folder
+  # under ~/code read as a dirty repository, which stops `--leave`. A lane is a repository only
+  # when it IS the top of one; -ef rather than string equality, for the bind-mount reason classify
+  # gives. Measured: notes/2026-09-26_laptop_sync_readiness_audit.md §1.
+  top=$(git -C "$r" rev-parse --show-toplevel 2>/dev/null) || top=""
+  if [ -z "$top" ] || ! [ "$top" -ef "$r" ]; then echo "no-git|not a git repository${top:+ (it sits inside $top)}"; return; fi
+  # FAIL CLOSED, the way chezmoi_state does (review S2-8). This was
+  #   dirty=$(git -C "$r" status --porcelain 2>/dev/null | grep -c .) || dirty=0
+  # and a `git status` that ERRORED gave empty output, so grep counted 0, `|| dirty=0` swallowed
+  # the status, and the lane read `no-remote|clean`. A repository whose state could not be read
+  # reported clean — and `--leave` pushes on clean. Not being able to ask is not an answer.
+  local gout grc=0
+  gout=$(git -C "$r" status --porcelain 2>/dev/null) || grc=$?
+  if [ "$grc" -ne 0 ]; then
+    echo "dirty|git status exited $grc here, so uncommitted work cannot be ruled out"
+    return
+  fi
+  dirty=$(printf '%s' "$gout" | grep -c .) || dirty=0
+  up=$(git -C "$r" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || up=""
+  if [ "$dirty" -gt 0 ]; then
+    echo "dirty|$dirty uncommitted change(s)${up:+, upstream $up}"
+    return
+  fi
+  if [ -z "$up" ]; then echo "no-remote|clean, but this branch tracks nothing"; return; fi
+  # The SAME fail-open as the status read above, two lines below it, and the 2026-09-15 fix caught
+  # only the first (found by an altitude review, 2026-09-16). An empty `counts` had two causes —
+  # the upstream ref genuinely absent from this clone, which is ordinary, and `rev-list` FAILING,
+  # which is not — and both reported `no-remote`, which is NOT in STATE_STOP, so `--leave` pushed.
+  # Fixing one instance of a shape and leaving its neighbour is the whole reason this round exists.
+  local crc=0
+  counts=$(git -C "$r" rev-list --left-right --count "$up...HEAD" 2>/dev/null) || crc=$?
+  if [ "$crc" -ne 0 ]; then
+    echo "dirty|git rev-list exited $crc against $up, so ahead/behind cannot be ruled out"
+    return
+  fi
+  if [ -z "$counts" ]; then echo "no-remote|clean, upstream $up is not in this clone"; return; fi
+  behind=${counts%%[!0-9]*}; ahead=${counts##*[!0-9]}
+  if   [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then echo "diverged|$ahead ahead, $behind behind $up (last known)"
+  elif [ "$ahead"  -gt 0 ]; then echo "ahead|$ahead commit(s) to push to $up"
+  elif [ "$behind" -gt 0 ]; then echo "behind|$behind commit(s) to pull from $up"
+  else echo "clean|level with $up as last fetched (status runs no fetch)"; fi
+}
+
+# chezmoi_state fails CLOSED. Both the absent-chezmoi case and a `chezmoi status` that exits
+# non-zero used to end in an empty list and therefore `clean`, so drift=0 meant either "the source
+# and the targets agree" or "nothing could be asked" — and post_13d11.sh asserts drift=0. Not being
+# able to ask is not an answer, so both now report `drift`, which is in STATE_STOP and stops
+# --leave until a person has looked.
+chezmoi_state() {
+  local out n rc
+  have chezmoi || { echo "drift|chezmoi is not on PATH here, so drift cannot be ruled out"; return; }
+  # --exclude=scripts, not a bare `chezmoi status`. A run_onchange script that has not run is not
+  # a target disagreeing with its source: the laptop carries ` R install-packages.sh` indefinitely
+  # (13d.5's 178-package installer), so a bare status made drift=0 unreachable there and
+  # post_13d11.sh:519 red for a condition post_13d1.sh:20 deliberately passes. The flag is
+  # chezmoi's own and is already used at post_13d1.sh:20, 13d.4/03_chezmoi_apply.sh:43,
+  # 13d.4/post_13d4.sh:47 and 13d.5/07_chezmoi_record.sh:82. Measured off the installed binary
+  # rather than the documentation: post_13d1_20260912-143841.log line 7 logs
+  # `PASS  chezmoi status empty (scripts excluded)` while line 9 shows the unfiltered
+  # ` R install-packages.sh` — one run, one machine, both answers.
+  out=$(chezmoi status --exclude=scripts 2>/dev/null) || { rc=$?; echo "drift|chezmoi status exited $rc, so drift cannot be ruled out"; return; }
+  n=$(printf '%s\n' "$out" | grep -c .) || n=0
+  if [ "$n" -gt 0 ]; then echo "drift|$n path(s) differ between source and target"
+  else echo "clean|source and targets agree"; fi
+}
+
+# lane_preview <root> — how many items differ, each way, WITHOUT moving one. up and down have no
+# dry-run of their own, so there is nothing to reuse here: this is a preview, and the TRANSFER is
+# what goes through up/down (see act, push-files/pull-files). `-n` and `--itemize-changes` are the
+# only reason rsync is named in this function; no flag is copied from upload_to.sh, and --delete
+# appears nowhere in this file. It is off by default because it walks the whole lane: 29 G of
+# ~/documents is a metadata walk of a minute or two, which is fine when you asked about that one
+# lane and wrong for a table of seven.
+# The second argument is the lane's ENGINE. For a unison lane the preview has to exclude what the
+# profile ignores, or it counts items unison will never move (review S2-3): peer.prf ignores
+# `Name .git`, `Name {*.tmp,*~}` and `Path research/i09-jan-2023-data` — and that last one is 515 MB
+# of irreplaceable beamline data that decision D5 put on the desktop ON PURPOSE. A preview claiming
+# it "would go out" is not merely a wrong number; it is the wrong number about the one path the
+# profile exists to protect. For a plain lane no profile applies and nothing is excluded.
+# These excludes have to stay equal to peer.prf's ignore lines. Nothing compares them — recorded
+# rather than solved, because the profile is not this file's to parse at runtime.
+lane_preview() {
+  local root=$1 engine=${2:-plain} rel out push pull
+  local -a ex=()
+  if [ "$engine" = unison ]; then
+    ex=(--exclude '.git' --exclude '*.tmp' --exclude '*~')
+    [ "$root" = "$HOME/research" ] && ex+=(--exclude 'i09-jan-2023-data')
+  fi
+  rel=${root#"$HOME"/}
+  # STEP 42, G1. Both previews were `|| out=""`, so an unreachable peer produced
+  # `0 item(s) would go out, 0 would come in` — word for word what two directories that already
+  # agree produce. This IS the whole content of DEEP mode, so the operator read "nothing to do"
+  # from a question that was never asked. rsync's status is kept now, and a preview that did not
+  # happen says so instead of counting to zero. The return is non-zero as well, which costs the
+  # callers nothing — this file runs `set -uo pipefail` with no `-e`, and both callers take the
+  # text through a command substitution — but it is there for a caller that ever wants to branch.
+  local rc=0
+  out=$(rsync -n -a --itemize-changes ${ex+"${ex[@]}"} -e "ssh ${SSH_OPTS[*]}" "$root/" "$PEER:$rel/" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "preview unavailable — rsync could not reach $PEER (exit $rc). Nothing was measured; this is NOT '0 items'."
+    return 1
+  fi
+  push=$(printf '%s\n' "$out" | grep -c '^[<>ch]') || push=0
+  out=$(rsync -n -a --itemize-changes ${ex+"${ex[@]}"} -e "ssh ${SSH_OPTS[*]}" "$PEER:$rel/" "$root/" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "preview unavailable — rsync could not read $PEER's copy (exit $rc). Nothing was measured; this is NOT '0 items'."
+    return 1
+  fi
+  pull=$(printf '%s\n' "$out" | grep -c '^[<>ch]') || pull=0
+  local note=""
+  [ "$engine" = unison ] && note=" (the profile's ignores excluded)"
+  echo "$push item(s) would go out, $pull would come in$note"
+}
+
+# unison_state — reachability first, because everything else is unanswerable without it.
+# `-testserver` connects, checks that unison is on the far side and exits; `-batch` beside it only
+# stops it asking anything on the way. It propagates nothing, which is why it is the one place in
+# this file where -batch is allowed.
+unison_state() {
+  local root=$1 detail
+  [ -d "$root" ] || { echo "missing|$(tilde "$root") does not exist on this machine"; return; }
+  [ -f "$PEER_PRF" ] || { echo "missing|no unison profile at $(tilde "$PEER_PRF")"; return; }
+  have unison || { echo "missing|unison is not on PATH"; return; }
+  peer_up || { echo "unreachable|$PEER did not answer ssh"; return; }
+  if ! unison "$UNISON_PROFILE" -batch -testserver >/dev/null 2>&1; then
+    echo "unreachable|$PEER answers ssh but the unison server did not start"; return
+  fi
+  # What -testserver actually proved, stated exactly (review S2-4). MEASURED on the installed
+  # unison 2.54.0, 2026-09-15: a profile carrying `backuplocation` — an option name that does not
+  # exist — ran to "Nothing to do" with no error, and `-testserver` returned 0 on that same broken
+  # profile. So this proves ssh reached $PEER and a unison server started there. It proves NOTHING
+  # about the profile: not that its options are spelled right, not that its `path =` lines match
+  # this table, not that its roots are the intended pair. Nothing in this repository compares
+  # peer.prf's lanes with LANES, and no gate would catch a typo in an option name. The first real
+  # test of peer.prf is Filipe's own `unison peer -auto`.
+  detail="$PEER answers and a unison server starts there (this says nothing about the profile)"
+  [ "$DEEP" = 1 ] && detail="$detail; $(lane_preview "$root" unison)"
+  echo "ok|$detail"
+}
+
+plain_state() {
+  local root=$1 detail
+  [ -d "$root" ] || { echo "missing|$(tilde "$root") does not exist on this machine"; return; }
+  peer_up || { echo "unreachable|$PEER did not answer ssh"; return; }
+  detail="not a tracked lane — up/down only"
+  # `plain`: no profile applies, so nothing is excluded from the preview.
+  [ "$DEEP" = 1 ] && detail="$detail; $(lane_preview "$root" plain)"
+  echo "ok|$detail"
+}
+
+# ── status ──────────────────────────────────────────────────────────────────────────────────────
+# status_one <root> <kind> <engine> — one record, counters updated. Exempt lanes print their REAL
+# state and say why they do not count; that is D9's whole point.
+status_one() {
+  local root=$1 kind=$2 engine=$3 sd state detail name
+  case "$engine" in
+    git)     sd=$(git_state "$root") ;;
+    chezmoi) sd=$(chezmoi_state) ;;
+    unison)  sd=$(unison_state "$root") ;;
+    *)       sd=$(plain_state "$root") ;;
+  esac
+  state=${sd%%|*}; detail=${sd#*|}
+  name=$(tilde "$root"); [ "$engine" = chezmoi ] && name="chezmoi"
+  is_exempt "$root" && detail="$detail  [D9: live work unrelated to the migration — not counted]"
+  printf '%s|%s|%s|%s\n' "$name" "$kind" "$state" "$detail"
+}
+
+# tally <records> — the counters, computed FROM the finished records rather than while they are
+# produced. Every call site reads status through a pipeline or a command substitution, and a
+# subshell's variable updates do not survive one: counting inside status_one left every number at
+# zero underneath a table that was perfectly right, so `--all` reported dirty=0 on a dirty machine
+# and `--leave` pushed straight past a lane it should have stopped on. Caught by this batch's
+# harness on the first run, not by reading. The D9 marker in the detail is what exempts a lane,
+# so the list is read once, in status_one, and never re-derived here.
+tally() {
+  local name kind state detail
+  N_LANES=0; N_DRIFT=0; N_DIRTY=0; N_EXEMPT=0; N_UNREACH=0; N_STOP=0
+  while IFS='|' read -r name kind state detail; do
+    [ -n "$name" ] || continue
+    N_LANES=$((N_LANES+1))
+    case "$detail" in *"[D9:"*) N_EXEMPT=$((N_EXEMPT+1)); continue ;; esac
+    case " $STATE_STOP " in *" $state "*) N_STOP=$((N_STOP+1)) ;; esac
+    case "$state" in
+      drift)          N_DRIFT=$((N_DRIFT+1)) ;;
+      dirty|diverged) N_DIRTY=$((N_DIRTY+1)) ;;
+      unreachable)    N_UNREACH=$((N_UNREACH+1)) ;;
+    esac
+  done <<< "$1"
+}
+
+# status [<path>] — with a path, that lane; with none, every lane there is: each directory under
+# ~/code, chezmoi, and every row of LANES whose engine is unison. Plain lanes appear only when you
+# point hsync at one.
+status() {
+  local kce d row pat rest kind engine
+  if [ $# -gt 0 ] && [ -n "$1" ]; then
+    kce=$(classify "$1") || return 2
+    status_one "${kce##*|}" "${kce%%|*}" "$(printf '%s' "$kce" | cut -d'|' -f2)"
+    return 0
+  fi
+  for d in "$HOME"/code/*/; do
+    [ -d "$d" ] || continue
+    status_one "${d%/}" code git
+  done
+  # D9's list is read HERE as well, not only by is_exempt. One of the two standing exceptions
+  # lives outside ~/code, so without this loop it would never appear in the table at all and the
+  # exception would be a hold nothing enumerates — the failure the 2026-09-14 corrections entry
+  # describes ("a hold expressed as a list must be read by every site that enumerates what it
+  # holds back"). Marked, in the table, with its real state, is the whole point of D9.
+  for d in "${D9_EXEMPT[@]}"; do
+    case "$d" in "$HOME"/code/*) continue ;; esac
+    [ -d "$d" ] || continue
+    # STEP 43. This printed `code git` for every exempt path outside ~/code. It is not wrong TODAY
+    # only because a LANES row was added at :88 so classify would give the same answer — two sites
+    # kept in step by hand, which is exactly the shape step 20 removed from R_COMMON by deriving one
+    # end from the other. Ask the table instead. If that row is ever struck out this says
+    # `plain plain`, which is honest, rather than `code git`, which would be a label nothing
+    # supports. classify returns 3 for the three roots it refuses; none is on this list, and
+    # `|| continue` is there so a future one cannot print a half-built row.
+    kce=$(classify "$d") || continue
+    status_one "$d" "${kce%%|*}" "$(printf '%s' "$kce" | cut -d'|' -f2)"
+  done
+  # No `have chezmoi &&` here: dropping the lane when chezmoi is off a non-interactive PATH made
+  # the table shorter and drift=0, which reads exactly like a clean machine. chezmoi_state answers
+  # for that case itself, and it answers `drift`.
+  status_one "chezmoi" dotfiles chezmoi
+  # The document lanes come FROM the table, which is what the comment at the top of LANES has
+  # always claimed and what a hardcoded list of four directory names made untrue.
+  # The engine filter one line into the loop already drops both of the rows the two skips below
+  # were written for: `@chezmoi` is engine `chezmoi` and every `<dir>/*` row is engine `git` or
+  # `plain`. So NEITHER SKIP CAN RUN as this table stands, and the comment that used to sit here
+  # described them as doing work today (review S2-6). They are kept as a guard on a FUTURE row —
+  # a unison lane written as a glob, or a second sentinel — because without them status_one would
+  # run on the literal string, print a bogus `missing` record, inflate lanes= and break the field
+  # parse post_13d11.sh does on the summary line. Unreachable today, cheap, and the thing they
+  # prevent is silent. If a unison glob row is ever added, delete this note with it.
+  for row in "${LANES[@]}"; do
+    pat=${row%%|*}; rest=${row#*|}; kind=${rest%%|*}; engine=${rest##*|}
+    [ "$engine" = unison ] || continue
+    [ "$pat" = "@chezmoi" ] && continue
+    case "$pat" in *'*'*) continue ;; esac
+    status_one "$pat" "$kind" "$engine"
+  done
+}
+
+# print_table — the records on stdin, aligned, with the summary line last. The summary is the one
+# machine-readable line in this tool: post_13d11.sh reads drift= and dirty= out of it.
+print_table() {
+  local line name kind state detail
+  printf '%-34s %-10s %-12s %s\n' LANE KIND STATE DETAIL
+  while IFS= read -r line; do
+    name=$(printf '%s' "$line" | cut -d'|' -f1)
+    kind=$(printf '%s' "$line" | cut -d'|' -f2)
+    state=$(printf '%s' "$line" | cut -d'|' -f3)
+    detail=$(printf '%s' "$line" | cut -d'|' -f4-)
+    printf '%-34s %-10s %-12s %s\n' "$name" "$kind" "$state" "$detail"
+  done
+}
+
+summary_line() {
+  echo "hsync: summary lanes=$N_LANES drift=$N_DRIFT dirty=$N_DIRTY exempt=$N_EXEMPT unreachable=$N_UNREACH"
+}
+
+# ── act ─────────────────────────────────────────────────────────────────────────────────────────
+# One named action, and nothing clever. Every one of these is a call to a tool that already exists
+# on both machines; a change to upload_to.sh changes what push-files does, which is the point of
+# the reuse rule.
+act() {
+  local root=$1 action=$2 rc=0
+  case "$action" in
+    push-git)
+      git -C "$root" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1 || {
+        note "$(tilde "$root"): this branch tracks nothing, so there is nothing to push to."
+        note "  If it should have one:  git -C $(tilde "$root") push -u origin HEAD"
+        return 1; }
+      note "push  $(tilde "$root")"
+      git -C "$root" push || rc=$? ;;
+    pull-git)
+      note "pull  $(tilde "$root")  (fast-forward only)"
+      git -C "$root" pull --ff-only || rc=$? ;;
+    push-files)
+      note "up    $(tilde "$root")  ->  $PEER   (up asks its own Y/N)"
+      ( cd "$root" && up "$PEER" ) || rc=$? ;;
+    pull-files)
+      note "down  $PEER  ->  $(tilde "$root")   (down asks its own Y/N)"
+      ( cd "$root" && down "$PEER" ) || rc=$? ;;
+    chezmoi-readd)
+      have chezmoi || { note "chezmoi is not on PATH"; return 1; }
+      note "what differs between the targets and the source:"
+      chezmoi status
+      note "and WHAT the difference is — read this before answering. The diff reads source -> target;"
+      note "  a re-add moves it the other way, target -> source."
+      chezmoi diff
+      # The same invariant chezmoi-update keeps twelve lines below: nothing changes until the
+      # difference has been printed AND a person has said yes on a terminal. `chezmoi re-add` with
+      # no target re-adds every modified file at once, so it earns the question at least as much
+      # as an apply does.
+      if [ -t 0 ]; then
+        local ans=""
+        read -r -p "hsync: take the TARGETS into the source (re-add)? [y/N] " ans
+        case "$ans" in
+          y|Y) note "re-adding. Nothing is applied and nothing is committed."
+               chezmoi re-add || rc=$? ;;
+          *)   note "nothing re-added. Re-run when you have read the diff." ;;
+        esac
+      else
+        note "no terminal here, so nothing was re-added. Run 'hsync' in a managed directory from a shell you are sitting at."
+      fi ;;
+    chezmoi-update)
+      have chezmoi || { note "chezmoi is not on PATH"; return 1; }
+      note "pulling the dotfiles source (fast-forward only)"
+      chezmoi git pull -- --ff-only || rc=$?
+      note "what an apply would change — read this before answering:"
+      chezmoi diff
+      # The invariant, made executable: an apply happens only after that diff has been printed AND
+      # a person has said yes on a terminal. With no terminal it is skipped with a line, never
+      # taken as consent.
+      if [ -t 0 ]; then
+        local ans=""
+        read -r -p "hsync: apply those changes? [y/N] " ans
+        case "$ans" in
+          y|Y) chezmoi apply || rc=$? ;;
+          *)   note "not applied. Re-run when you have read the diff." ;;
+        esac
+      else
+        note "no terminal here, so nothing was applied. Run 'hsync --arrive' from a shell you are sitting at."
+      fi ;;
+    unison-sync)
+      have unison || { note "unison is not on PATH (on the laptop: sudo pacman -S --needed unison)"; return 1; }
+      [ -f "$PEER_PRF" ] || { note "no unison profile at $(tilde "$PEER_PRF")"; return 1; }
+      note "unison $UNISON_PROFILE -auto   (takes the default for everything that is not a conflict,"
+      note "  and still asks on every conflict. Not -batch, not -force.)"
+      unison "$UNISON_PROFILE" -auto || rc=$? ;;
+    *)
+      die "unknown action '$action'. One of: push-git pull-git push-files pull-files chezmoi-readd chezmoi-update unison-sync" ;;
+  esac
+  return "$rc"
+}
+
+# ── the wake path ───────────────────────────────────────────────────────────────────────────────
+# The two values live in peer.env and nowhere else. This file is public; peer.env is mode 600,
+# not chezmoi-managed and never committed (D10). Neither value is ever printed — not on success,
+# not in an error, not in a refusal: `wol` is called with them already in variables and no message
+# below repeats one. THE ONE EXCEPTION, which this comment used to deny (review S2-9): `set -x`
+# traces the command line, so `wol -i "$LAN_BROADCAST" "$PEER_MAC"` is printed with both words
+# EXPANDED. Nothing in this file sets -x, but anyone debugging it with `bash -x hsync` will see
+# them. Neither is a secret in the sense a key is — a MAC address and a broadcast address — but the
+# claim had to match the code.
+# peer.env is DATA, not shell. It used to be read with `.`, which runs whatever is in it as this
+# user, and the comment here promised a mode check that the code never performed. It is now read
+# line by line behind three gates: this user must own the file, its mode must be 600 or 400, and
+# each value must have the exact shape `wol` takes. Only PEER_MAC and LAN_BROADCAST are assigned;
+# any other key is ignored. Both values go straight to `wol -i`, which is why the shape checks are
+# load-bearing rather than decoration.
+wake_peer() {
+  local mode k v mac_re bcast_re
+  [ "$PEER" = desktop ] || { note "$PEER is not woken from here — only the desktop has a wake path."; return 1; }
+  if [ ! -r "$PEER_ENV" ]; then
+    note "no $(tilde "$PEER_ENV"), so the desktop cannot be woken from here."
+    note "  Create it (mode 600, never committed) with the two values from the top of"
+    note "  /usr/local/bin/backup-home.sh, one per line, bare — no 'export', no quotes needed:"
+    note "    PEER_MAC=<six colon-separated hex pairs>   LAN_BROADCAST=<dotted decimal address>"
+    return 2
+  fi
+  [ -O "$PEER_ENV" ] || {
+    note "$(tilde "$PEER_ENV") is not owned by you, so it is not read."; return 2; }
+  mode=$(stat -c %a "$PEER_ENV" 2>/dev/null) || mode=""
+  case "$mode" in
+    600|400) ;;
+    *) note "$(tilde "$PEER_ENV") is mode ${mode:-unreadable}; it must be 600 or 400. chmod 600 it, then run this again."
+       return 2 ;;
+  esac
+  PEER_MAC=""; LAN_BROADCAST=""
+  # `|| [ -n "$k" ]` so a last line with no trailing newline is still seen: read returns 1 there
+  # having already filled k and v, and without this a perfectly good file would look empty.
+  # One layer of matching quotes is stripped, because the file used to be sourced and may have
+  # been written that way.
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k=${k#"${k%%[![:space:]]*}"}; k=${k%"${k##*[![:space:]]}"}
+    v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
+    case "$v" in
+      \"*\") v=${v#\"}; v=${v%\"} ;;
+      \'*\') v=${v#\'}; v=${v%\'} ;;
+    esac
+    case "$k" in
+      PEER_MAC)      PEER_MAC=$v ;;
+      LAN_BROADCAST) LAN_BROADCAST=$v ;;
+    esac
+  done < "$PEER_ENV"
+  [ -n "$PEER_MAC" ] && [ -n "$LAN_BROADCAST" ] || {
+    note "$(tilde "$PEER_ENV") is there but does not set both PEER_MAC and LAN_BROADCAST."; return 2; }
+  # Shape only, and the refusal says what was wrong without saying what it saw.
+  mac_re='^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+  bcast_re='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+  [[ $PEER_MAC =~ $mac_re ]] || {
+    note "PEER_MAC in $(tilde "$PEER_ENV") is not six colon-separated hex pairs. Nothing was sent."; return 2; }
+  [[ $LAN_BROADCAST =~ $bcast_re ]] || {
+    note "LAN_BROADCAST in $(tilde "$PEER_ENV") is not four dotted decimal numbers. Nothing was sent."; return 2; }
+  have wol || { note "the 'wol' command is not installed, so no packet can be sent."; return 2; }
+  # Two packets a second apart, which is what backup-home.sh does: one is occasionally dropped by
+  # a switch that has aged the address out, and a second costs nothing.
+  wol -i "$LAN_BROADCAST" "$PEER_MAC" >/dev/null 2>&1 || true
+  sleep 1
+  wol -i "$LAN_BROADCAST" "$PEER_MAC" >/dev/null 2>&1 || true
+  note "wake-on-LAN sent to $PEER (values read from $(tilde "$PEER_ENV"), not printed)"
+  return 0
+}
+
+wait_peer() {
+  local limit=${1:-$WOL_TIMEOUT} waited=0
+  peer_up && return 0
+  while [ "$waited" -lt "$limit" ]; do
+    sleep "$WOL_STEP"
+    waited=$((waited + WOL_STEP))
+    if peer_up; then note "$PEER answered after ${waited}s"; return 0; fi
+    note "  waiting for $PEER ... (${waited}/${limit}s)"
+  done
+  return 1
+}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# 4. THE FOUR ENTRY POINTS
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+usage() {
+  cat <<USAGE
+hsync — sync this machine with $PEER. Four entry points:
+
+  hsync [<dir>]      status for the lane <dir> is in (default: the current directory),
+                     then a numbered menu, then ONE action.
+  hsync --all        every lane, status table only. Nothing is changed. Add --deep for the
+                     per-lane rsync preview (a full metadata walk; slow on ~/documents).
+  hsync --leave      all lanes, no menu — unless a lane is dirty, diverged, drifted or
+                     unreachable, in which case it stops and prints the per-lane command. Those
+                     four are STATE_STOP; a lane on the D9 exception list is listed with its real
+                     state but is not one of them. Nothing is forced.
+                     The git half is push-only. The document half is 'unison -auto', which is
+                     TWO-WAY and propagates deletions in BOTH directions.
+  hsync --arrive     all lanes, pull direction. Wakes $PEER first if it is the desktop and asleep,
+                     then chezmoi, then git, then unison, then a package-manifest REPORT.
+                     The document half is 'unison -auto' here too, so it is TWO-WAY.
+                     hsync installs nothing itself. Step 2 can: a full 'chezmoi apply' runs the
+                     dotfiles' package hook, which prompts and then installs. You are asked
+                     before that apply, and the manifest report at step 5 installs nothing.
+
+Lanes: ~/code/* is git; chezmoi owns the dotfiles; ~/documents ~/career ~/research ~/inbox are
+unison; anything else is up/down. Big data is desktop-only and has no lane at all.
+USAGE
+}
+
+# `hsync` in a directory. The menu offers only the actions that mean something for this engine.
+entry_here() {
+  local path=${1:-$PWD} kce engine root rec choice
+  # classify returns 3 for the three roots D-H2 refuses, having printed why on stderr. Reading the
+  # status is what makes the refusal real: an unchecked $( ) would leave kce empty and print a menu.
+  kce=$(classify "$path") || return 2
+  root=${kce##*|}
+  engine=$(printf '%s' "$kce" | cut -d'|' -f2)
+  # status, not status_one: the one-path branch of status is the interface this menu describes,
+  # and a path that only ever runs in the harness is a path nobody has run.
+  rec=$(status "$path")
+  printf '%s\n' "$rec" | print_table
+  echo
+  local -a labels=() actions=()
+  case "$engine" in
+    git)     labels=("push  (git push)" "pull  (git pull --ff-only)")
+             actions=(push-git pull-git) ;;
+    chezmoi) labels=("re-add this machine's files into the dotfiles source" "pull the source, show the diff, then ask before applying")
+             actions=(chezmoi-readd chezmoi-update) ;;
+    unison)  labels=("sync the document lanes with $PEER (unison -auto)")
+             actions=(unison-sync) ;;
+    *)       labels=("push  (up $PEER)" "pull  (down $PEER)")
+             actions=(push-files pull-files) ;;
+  esac
+  local i=1 l
+  for l in "${labels[@]}"; do echo "  $i) $l"; i=$((i+1)); done
+  echo "  0) nothing"
+  if [ ! -t 0 ]; then
+    note "no terminal, so no action was taken. Run this from a shell you are sitting at,"
+    note "  or name the action:  hsync --leave  /  hsync --arrive"
+    return 0
+  fi
+  read -r -p "hsync: which? [0] " choice
+  case "$choice" in
+    ''|0) note "nothing done." ; return 0 ;;
+    *)
+      case "$choice" in (*[!0-9]*|'') die "not a number: $choice" ;; esac
+      [ "$choice" -ge 1 ] && [ "$choice" -le "${#actions[@]}" ] || die "no such option: $choice"
+      act "$root" "${actions[$((choice-1))]}" ;;
+  esac
+}
+
+entry_all() {
+  local records
+  records=$(status)
+  printf '%s\n' "$records" | print_table
+  tally "$records"
+  echo
+  summary_line
+  if [ "$N_EXEMPT" -gt 0 ]; then
+    note "$N_EXEMPT lane(s) are D9 standing exceptions: they are shown above with their real state"
+    note "  and are not counted in dirty=. Everything else counted is a real finding."
+  fi
+}
+
+# --leave: no menu of its own. The GIT half is push-only. The DOCUMENT half is `unison -auto`,
+# which is two-way: it propagates deletions in both directions, so a file deleted on the peer is
+# deleted here too. unison has no one-way mode short of `-force`, which line 19 forbids, so the
+# honest thing is to say what the call does rather than to name a flag this file may not use.
+# The tools it calls keep their own confirmations —
+# up and down ask Y/N, unison -auto asks on conflicts — and hsync never answers those for you.
+# "Runs without asking" means hsync does not ask WHICH action; it does not mean the underlying
+# tool has been silenced.
+entry_leave() {
+  local records stopped
+  records=$(status)
+  printf '%s\n' "$records" | print_table
+  tally "$records"
+  echo
+  summary_line
+  if [ "$N_STOP" -gt 0 ]; then
+    echo
+    note "STOPPING. $N_STOP lane(s) need a decision before anything is pushed:"
+    # The `[D9:` skip is the same one tally() applies before it counts N_STOP. Without it this loop
+    # printed a line for every stopping state INCLUDING the exempt ones, so the count and the list
+    # disagreed — "STOPPING. 9 lane(s)" above ten lines (review S2-1). The exempt lanes are still
+    # in the table above with their real state word; they just are not things to decide.
+    while IFS='|' read -r name _ state detail; do
+      case "$detail" in *"[D9:"*) continue ;; esac
+      case " $STATE_STOP " in *" $state "*) ;; *) continue ;; esac
+      case "$name" in
+        chezmoi) note "  chezmoi ($state)  ->  chezmoi status ; chezmoi diff   (then hsync in a managed directory)" ;;
+        *)       note "  $name ($state)  ->  hsync $name" ;;
+      esac
+    done <<< "$records"
+    note "Run the command beside each one, decide, then run 'hsync --leave' again."
+    return 1
+  fi
+  stopped=0
+  echo
+  note "starting. Nothing below is forced. The git half is push-only; the document half is"
+  note "  'unison -auto', which is TWO-WAY and propagates deletions in BOTH directions."
+  local d st
+  for d in "$HOME"/code/*/; do
+    [ -d "$d" ] || continue
+    # STEP 41. This loop never asked. `is_exempt` existed and was called at exactly ONE site in the
+    # whole file — one call inside `status`, for a detail line — so `--leave` PUSHED a D9-exempt repository while the
+    # closing line below said "nothing here touched them". Proved with a real push against a local
+    # bare repository: origin/main moved. `internet-speed` is on that list and is PUBLIC, so the
+    # gap's worst case was this tool publishing live work from a machine nobody was sitting at.
+    if is_exempt "${d%/}"; then
+      note "$(tilde "${d%/}"): on the D9 exception list — NOT pushed. hsync --all lists its real state."
+      continue
+    fi
+    st=$(git_state "${d%/}"); st=${st%%|*}
+    [ "$st" = ahead ] || continue
+    act "${d%/}" push-git || stopped=$((stopped+1))
+  done
+  if have unison && [ -f "$PEER_PRF" ]; then
+    act "$HOME/documents" unison-sync || stopped=$((stopped+1))
+  else
+    note "unison or its profile is missing, so the document lanes were not synced."
+  fi
+  [ "$stopped" -gt 0 ] && { note "$stopped action(s) reported a failure — read the lines above."; return 1; }
+  # Not "Nothing was left dirty": the D9 lanes are exempt from the COUNT, not from reality, and
+  # that sentence is false whenever one of them is dirty — which is the normal case, since being
+  # dirty with live work is why they are exempt (review S2-1).
+  note "done. Nothing outside the D9 exception list was left dirty; the D9 lanes are listed above"
+  note "  with their real state, and nothing here touched them."
+  return 0
+}
+
+# --arrive: pull direction. The ORDER is the point — the peer is woken and waited for BEFORE
+# anything tries to reach it, or every pull below fails on a machine that was merely asleep.
+entry_arrive() {
+  local rc=0 d st
+  say_step() { echo; echo "--- $*"; }
+
+  say_step "1. is $PEER awake?"
+  if peer_up; then
+    note "$PEER is already up."
+  else
+    note "$PEER did not answer."
+    wake_peer
+    case $? in
+      0) if ! wait_peer "$WOL_TIMEOUT"; then
+           note "$PEER did not come up within ${WOL_TIMEOUT}s. Nothing below was attempted."
+           return 1
+         fi ;;
+      1) note "Nothing else here can run without $PEER. Start it and run 'hsync --arrive' again."
+         return 1 ;;
+      *) note "Cannot wake $PEER from here. Start it by hand, then run 'hsync --arrive' again."
+         return 1 ;;
+    esac
+  fi
+
+  say_step "2. the dotfiles — the ONE step here that can install anything (it asks first)"
+  act chezmoi chezmoi-update || rc=$?
+
+  say_step "3. the code repositories (fast-forward only, and never over local changes)"
+  # clean, behind AND ahead all get the pull, and the reason is that git_state runs no fetch:
+  # ahead/behind are read against the upstream ref AS IT ALREADY STANDS, so on a machine that has
+  # been away — which is the entire premise of --arrive — nothing reads `behind` and a version
+  # that pulled only those repositories would pull nothing, ever. `git pull --ff-only` IS the
+  # fetch, it is a no-op when the branch is already level, and it refuses rather than merging if
+  # the remote has moved somewhere this branch cannot fast-forward to. Dirty and diverged are
+  # still left alone: a pull there is a decision, not a chore.
+  for d in "$HOME"/code/*/; do
+    [ -d "$d" ] || continue
+    # STEP 41, the same gap on the other side. No test row names this one; it is here because the
+    # step says `--arrive` has it too and because a hold expressed as a list must be read by every
+    # site that enumerates what it holds back (CLAUDE.md, 2026-09-14). A pull is gentler than a
+    # push and still not nothing: D9 means live work unrelated to this migration, and a pull over
+    # it is exactly what the exception exists to prevent.
+    if is_exempt "${d%/}"; then
+      note "$(tilde "${d%/}"): on the D9 exception list — NOT pulled. Left exactly as it is."
+      continue
+    fi
+    st=$(git_state "${d%/}"); st=${st%%|*}
+    case "$st" in
+      clean|behind|ahead) act "${d%/}" pull-git || rc=$? ;;
+      diverged) note "$(tilde "${d%/}"): diverged — left alone. Look at it with: hsync $(tilde "${d%/}")" ;;
+      dirty)    note "$(tilde "${d%/}"): uncommitted changes — left alone, a pull would be over them." ;;
+      *) ;;
+    esac
+  done
+
+  say_step "4. the document lanes"
+  if have unison && [ -f "$PEER_PRF" ]; then
+    act "$HOME/documents" unison-sync || rc=$?
+  else
+    note "unison or its profile is missing, so the document lanes were not synced."
+  fi
+
+  say_step "5. package manifest — a REPORT. THIS step installs nothing (step 2 above can)."
+  manifest_report
+
+  echo
+  return "$rc"
+}
+
+# manifest_report — which packages the chezmoi-managed lists name that this machine does not have
+# installed UNDER THAT NAME. It installs nothing and it is deliberately a name-for-name comparison:
+# `pacman -Q <name>` also answers for a name a package merely PROVIDES (libmpv-git provides mpv),
+# which is the right answer for "can I run it" and the wrong one for "does the list match the
+# machine". Sorting and comm are pinned to the same locale on purpose: comm checks its inputs'
+# order in ITS OWN locale, so a C-sorted list compared by a UTF-8 comm aborts (corrections log,
+# 2026-09-14).
+# Only three of the eight lists in ~/.config/pkglists can be compared with `pacman -Qq` at all:
+# native.txt, aur.txt and THIS machine's <machine>-only.txt. The other five name things pacman has
+# never heard of (flatpak application ids, go module paths, pipx and uv tools) or belong to the
+# peer, so globbing *.txt gave every --arrive a permanent block of false "listed but not installed
+# here" lines that would bury a real one. The map below is explicit — and every file it does not
+# compare is NAMED, because a silent skip list is worse than the false blocks it replaces. A file
+# that is in the directory and not in the map is named too, rather than quietly ignored.
+manifest_report() {
+  local d="$HOME/.config/pkglists" this other f base missing n s
+  local -a compare=() skipped=() unknown=()
+  [ -d "$d" ] || { note "no $(tilde "$d") — nothing to compare."; return 0; }
+  have pacman || { note "pacman is not here, so no manifest can be compared."; return 0; }
+  # This machine is whichever one PEER is not. STEP 44: the catch-all arm below CANNOT RUN. The
+  # guard at :41-52 exits 2 on any PEER that is not `desktop` or `laptop` — an un-rendered template
+  # included, since it matches the `*[{}]*` arm — so nothing reaches this function with an empty
+  # `this`. The comment here used to describe that arm as live machinery, and a comment that
+  # promises behaviour the code cannot produce is worse than no comment: it is what a reader
+  # reasons from. The arm STAYS, as a guard on a future caller, because this function is not
+  # private and dead code that refuses is cheaper than dead code that guesses.
+  case "$PEER" in
+    desktop) this=laptop;  other=desktop ;;
+    laptop)  this=desktop; other=laptop  ;;
+    *)       this="";      other=""      ;;
+  esac
+  for f in "$d"/*.txt; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in
+      native.txt|aur.txt) compare+=("$f") ;;
+      flatpak.txt)  skipped+=("$base — flatpak application ids, never pacman names") ;;
+      go-tools.txt) skipped+=("$base — go install targets, never pacman names") ;;
+      pipx.txt)     skipped+=("$base — pipx packages, never pacman names") ;;
+      uv-tools.txt) skipped+=("$base — uv tools, never pacman names") ;;
+      laptop-only.txt|desktop-only.txt)
+        if [ -n "$this" ] && [ "$base" = "$this-only.txt" ]; then
+          compare+=("$f")
+        elif [ -n "$other" ] && [ "$base" = "$other-only.txt" ]; then
+          skipped+=("$base — $other's list, not this machine's")
+        else
+          skipped+=("$base — this machine is neither laptop nor desktop, so neither -only list applies")
+        fi ;;
+      *) unknown+=("$base") ;;
+    esac
+  done
+  for f in "${compare[@]}"; do
+    missing=$(LC_ALL=C comm -23 \
+      <(sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$f" | grep -v '^$' | LC_ALL=C sort -u) \
+      <(pacman -Qq | LC_ALL=C sort -u))
+    n=$(printf '%s\n' "$missing" | grep -c .) || n=0
+    if [ "$n" -eq 0 ]; then
+      note "$(basename "$f"): every name is installed."
+    else
+      note "$(basename "$f"): $n name(s) listed but not installed here —"
+      printf '%s\n' "$missing" | sed 's/^/         /'
+    fi
+  done
+  [ "${#compare[@]}" -gt 0 ] || note "no list in $(tilde "$d") can be compared with pacman."
+  for s in "${skipped[@]}"; do note "not compared: $s"; done
+  for s in "${unknown[@]}"; do
+    note "not compared: $s — not in hsync's map. Add it to manifest_report, or it stays unchecked."
+  done
+  note "That is a report. Install nothing from it without deciding package by package."
+}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# 5. DISPATCH
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+main() {
+  local a mode="" target=""
+  for a in "$@"; do
+    case "$a" in
+      --all)    mode=all ;;
+      --leave)  mode=leave ;;
+      --arrive) mode=arrive ;;
+      --deep)   DEEP=1 ;;
+      -h|--help) usage; return 0 ;;
+      -*)       usage >&2; die "unknown option '$a'" ;;
+      *)        target=$a ;;
+    esac
+  done
+  [ -n "${HS_AGENT_ADOPTED:-}" ] && note "adopted the keyring's ssh agent (this shell exported none)"
+  case "$mode" in
+    all)    entry_all ;;
+    leave)  entry_leave ;;
+    arrive) entry_arrive ;;
+    *)      entry_here "${target:-$PWD}" ;;
+  esac
+}
+
+# Sourced by the harness (pending/13d.11/harness_13d11.sh) to drive classify, status, act,
+# wake_peer and wait_peer directly. Nothing else sets HSYNC_LIB.
+if [ -n "${HSYNC_LIB:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+main "$@"

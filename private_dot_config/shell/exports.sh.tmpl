@@ -10,7 +10,7 @@
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
-export XDG_STATE_HOME="$HOME/.local/state"   # was missing from original
+export XDG_STATE_HOME="$HOME/.local/state" # was missing from original
 # ── XDG overrides (Phase 9) ────────────────────────────────────────
 export HISTFILE="${XDG_STATE_HOME}/bash/history"
 export GNUPGHOME="$XDG_DATA_HOME/gnupg"
@@ -30,7 +30,7 @@ export READER="zathura"
 export LANG="en_US.UTF-8"
 
 # ── Wine ───────────────────────────────────────────────────────────
-export WINEARCH=win32              # 32-bit prefix for .wine/ (Vernissage)
+export WINEARCH=win32 # 32-bit prefix for .wine/ (Vernissage)
 
 # ── Git credential manager ─────────────────────────────────────────
 
@@ -38,7 +38,7 @@ export WINEARCH=win32              # 32-bit prefix for .wine/ (Vernissage)
 export BIB="$HOME/research/bibliography/bibliography.bib"
 
 # ── Conda / Mamba ──────────────────────────────────────────────────
-export CONDA_CHANGEPS1=false       # starship handles the prompt
+export CONDA_CHANGEPS1=false # starship handles the prompt
 
 # ── Coloured man pages ─────────────────────────────────────────────
 export LESS_TERMCAP_mb=$'\E[01;32m'
@@ -61,3 +61,5 @@ export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
 # Desktop: systemd user ssh-agent.service (13d.1 script 19); the laptop uses gnome-keyring's gcr agent
 export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
 {{- end }}
+#Experimental Bun
+export PATH="/home/filipejunqueira/.cache/.bun/bin:$PATH"

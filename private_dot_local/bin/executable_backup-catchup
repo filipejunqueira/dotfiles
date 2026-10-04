@@ -9,8 +9,47 @@ export BORG_PASSCOMMAND="pass keys/borg-laptop"
 export BORG_RSH="ssh -o ConnectTimeout=10 -o BatchMode=yes"
 DEADLINE=$(( $(date +%s) + 25200 ))   # 7h — covers 15:00 and the 19:00 fallback wake
 
-if pgrep -x borg >/dev/null; then
-  echo "a borg run is already in progress — exiting"
+# backup_running — returns 0 (stop) unless BOTH questions answer "none": `pgrep -x borg` exits exactly 1
+# AND backup-home.service reads `inactive` or `failed`. An error, a missing program or any other word
+# also returns 0, so nothing is cleared on a guess. Prints the reason. No `set -e` in this file on purpose.
+backup_running() {
+  local prc=0 sout scode=0
+  pgrep -x borg >/dev/null 2>&1 || prc=$?
+  case "$prc" in
+    1) ;;
+    0) echo "a borg run is already in progress"; return 0 ;;
+    *) echo "pgrep exited $prc, which is not an answer about borg"; return 0 ;;
+  esac
+  # A unit that does not exist also reads `inactive`, so it must be loaded first (review, 2026-10-04).
+  local lst lcode=0
+  lst=$(systemctl --user show -p LoadState --value backup-home.service 2>&1) || lcode=$?
+  if [ "$lst" != loaded ]; then
+    echo "backup-home.service LoadState reads '${lst:-<no answer>}' (systemctl exited $lcode); only 'loaded' can say whether it runs"
+    return 0
+  fi
+  sout=$(systemctl --user is-active backup-home.service 2>&1) || scode=$?
+  case "$sout" in
+    inactive|failed) return 1 ;;
+    *) echo "backup-home.service reads '${sout:-<no answer>}' (systemctl exited $scode); only 'inactive' or 'failed' means no backup is running"
+       return 0 ;;
+  esac
+}
+
+# desk_borg_running — returns 0 (stop) unless `pgrep -x borg` ON THE DESKTOP exits exactly 1.
+# break-lock breaks any client's lock, and a borg check run on the desktop is invisible here.
+# An ssh failure is not an answer either, so it stops too.
+desk_borg_running() {
+  local rc=0
+  ssh -o ConnectTimeout=10 -o BatchMode=yes "$DESK" pgrep -x borg >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    1) return 1 ;;
+    0) echo "a borg process is running on the desktop"; return 0 ;;
+    *) echo "asking the desktop about borg exited $rc, which is not an answer"; return 0 ;;
+  esac
+}
+
+if backup_running; then
+  echo "not starting, exiting"
   exit 1
 fi
 
@@ -21,7 +60,12 @@ until ssh -o ConnectTimeout=5 -o BatchMode=yes "$DESK" true 2>/dev/null; do
 done
 echo "[$(date +%H:%M:%S)] DESKTOP UP"
 
-# Safe now: the guard above proved no borg client is running on this machine.
+# Safe only if no backup is running NOW: a backup can start during the wait above, so it is asked again here,
+# and the desktop is asked too, now that it answers.
+if backup_running || desk_borg_running; then
+  echo "a backup may have started while waiting; lock not cleared, exiting"
+  exit 1
+fi
 echo "[$(date +%H:%M:%S)] clearing any stale repo lock..."
 borg break-lock "$REPO" && echo "  lock cleared/none" || echo "  break-lock returned non-zero (usually means no lock)"
 

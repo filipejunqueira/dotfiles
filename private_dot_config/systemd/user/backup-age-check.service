@@ -1,0 +1,21 @@
+[Unit]
+Description=Notice when the laptop's backup missed a scheduled run or has grown old
+Documentation=file:///home/filipejunqueira/.local/bin/backup-age-check
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/backup-age-check
+
+# Exit 1 means "something reported", a normal outcome, not a fault. Exit 2 (could not tell) is
+# left out on purpose, so a check that cannot read the journal shows in `systemctl --user status`.
+SuccessExitStatus=0 1
+
+# The phone alert reads its topic with `pass`, which works under a unit only with these two lines
+# (plan finding 16, the same two as backup-home.service.d/override.conf). The screen notification
+# needs the session bus, as backup-home.service:10 gives it.
+Environment=PASSWORD_STORE_DIR=%h/.local/share/pass
+Environment=GNUPGHOME=%h/.local/share/gnupg
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+
+# The nhs unit's four protection lines are left out of this first version. They are added only
+# if a real run under the unit shows `pass` still works with them (plan action 13).

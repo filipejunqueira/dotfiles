@@ -1,0 +1,22 @@
+[Unit]
+Description=Check the laptop's backup after each scheduled time and after each login
+
+[Timer]
+# 90 minutes after each of the backup's own times (Tue, Thu, Sat, Sun at 11:00, 15:00, 19:00).
+# The check's GRACE_MINUTES is the same 90, so at these times the run just scheduled is judged.
+OnCalendar=Tue,Thu,Sat,Sun *-*-* 12:30:00
+OnCalendar=Tue,Thu,Sat,Sun *-*-* 16:30:00
+OnCalendar=Tue,Thu,Sat,Sun *-*-* 20:30:00
+
+# A few minutes after the user's own systemd starts, which on this laptop (no lingering) is the
+# first login after a boot or after every session has ended. Waking from suspend does not count
+# (age_check_measured.md item 4).
+OnStartupSec=5min
+
+# A check time missed while logged out is run when the timer next starts. With OnStartupSec above,
+# a login after a missed check time runs the check twice within minutes. Harmless; recorded, not
+# fixed (PLAN_AMENDMENTS.md LH-A24).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -17,6 +17,9 @@
 .local/bin/compilebench.sh
 .local/bin/lid-sound-monitor.sh
 .local/bin/backup-catchup
+.local/bin/backup-age-check
+.config/systemd/user/backup-age-check.service
+.config/systemd/user/backup-age-check.timer
 .local/bin/claude-teams
 .local/bin/ccinit
 {{- end }}

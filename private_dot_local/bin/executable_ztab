@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# ztab <name> — open a tab for ~/code/<name> in the zellij session you are in: two panes side by
+# side in that folder, Claude Code (ccode) on the left and a shell on the right; the tab is named
+# <name>. From migration-toolkit, pending/desktop-sessions (PLAN-desktop-sessions.md decision 1).
+#
+# The layout is built each time from ~/.config/zellij/layouts/default.kdl, its one `children` line
+# replaced by the two panes. A tab opened from a layout file of its own gets no status bar unless
+# that file repeats the bar (measured on zellij 0.45.1, pending/desktop-sessions/zellij_measured.md),
+# so building from default.kdl keeps one copy of the bar and its colours.
+# ccode starts through an interactive zsh: a session started by `ssh -t desktop zellij attach -c
+# main` inherits ssh's short PATH, which has no ~/.local/bin. When ccode ends, the pane stays as a shell.
+set -euo pipefail
+
+die() { echo "ztab: $*" >&2; exit 1; }
+
+[ "$#" -eq 1 ] || die "usage: ztab <folder name under ~/code>"
+name=$1
+# One plain folder name: letters, digits, dot, underscore, hyphen; not starting with a dot or a
+# hyphen. So no `/`, no `.` or `..`, nothing empty, nothing zellij could read as an option.
+case "$name" in
+  ''|.*|-*|*[!A-Za-z0-9._-]*) die "'$name' is not one plain folder name under ~/code" ;;
+esac
+[ -n "${ZELLIJ:-}" ] || die "not inside a zellij session (attach first: zellij attach -c main)"
+dir="$HOME/code/$name"
+[ -d "$dir" ] || die "no folder $dir"
+base="${XDG_CONFIG_HOME:-$HOME/.config}/zellij/layouts/default.kdl"
+[ -f "$base" ] || die "no $base to build the tab from"
+
+n=$(grep -cE '^[[:space:]]*children[[:space:]]*$' "$base" || true)
+[ "$n" = 1 ] || die "$base has $n lines reading 'children', not one; the tab is built from that line"
+
+layout=$(awk '
+  /^[[:space:]]*children[[:space:]]*$/ {
+    print "        pane split_direction=\"vertical\" {"
+    print "            pane command=\"zsh\" {"
+    print "                args \"-ic\" \"ccode; exec zsh -i\""
+    print "            }"
+    print "            pane"
+    print "        }"
+    next
+  }
+  { print }' "$base")
+
+exec zellij action new-tab --layout-string "$layout" --cwd "$dir" --name "$name"

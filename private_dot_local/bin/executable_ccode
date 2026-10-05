@@ -23,11 +23,13 @@ Options:
   -e, --enter         Enter the container shell (no Claude Code)
   -f, --fleet         Open the session roster (FleetView) instead of a new session
   -n, --new           Force a brand-new session — the DEFAULT; kept for habit
+      --global-config Start in the config repository, ~/containers/claude-home/.claude
   -h, --help          Show this help
 
 
 Examples:
   cc                  New session in the current directory
+  cc --global-config  New session in the config repository, from any folder
   cc -f               Pick from running sessions instead
   cc -u               Update Claude Code to latest
   cc -l               Re-authenticate via browser
@@ -63,7 +65,7 @@ run_login() {
 }
 
 run_claude() {
-    local host_cwd="$PWD"
+    local host_cwd="$START_DIR"
     local -a args=()
     # A passthrough that already picks a session wins. `--session-id <new>` alongside
     # --resume or --continue is a contradiction, so do not inject one on top of them.
@@ -110,6 +112,9 @@ ACTION="run"
 # accident before: an empty '' argument used to suppress it, and removing that stray
 # argument on 2026-09-20 exposed the picker on every bare `cc`. -f asks for it on purpose.
 NEW_SESSION=1
+# The folder the session starts in. --global-config swaps it for the config repository,
+# so that one command opens it from anywhere.
+START_DIR="$PWD"
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -137,6 +142,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     -n | --new)
         NEW_SESSION=1
+        shift
+        ;;
+    --global-config)
+        START_DIR="$HOME/containers/claude-home/.claude"
         shift
         ;;
     -f | --fleet)

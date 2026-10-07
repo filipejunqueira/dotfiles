@@ -1,0 +1,40 @@
+# claude-memory.prf -- Claude Code's per-project memory, kept the same on the laptop and the desktop.
+#
+# PLAN-desktop-sessions.md decision 3 and action 9. It lives in the LAPTOP's ~/.unison only and is
+# run from there by ~/.local/bin/claude-memory-sync (claude-memory-sync.timer, every 10 minutes).
+# It shares nothing with peer.prf: other roots, so other archive files and its own backup folder.
+#
+# Never run it bare. claude-memory-sync adds one `-path <project>/memory` for each project folder
+# that holds memory on either machine, so unison only ever sees memory folders. Run without a
+# `-path`, it would take in every project folder as a whole, and a project folder removed on one
+# machine would then be removed on the other WITH the transcripts beside its `memory`, which these
+# ignore lines hide from unison (measured on the host, 2026-10-06, test_memory_sync.sh DELETE=1 case
+# "project-folder-removed": the laptop's transcript was gone, a copy only under backupdir).
+#
+# The ignore pair is the second fence, for that bare run: it keeps everything inside a project folder
+# but `memory` out. It is Regex, not `Path */*`: in a Path pattern `*` does not match a name that
+# begins with a dot, so `Path */*` let a `.hidden` file through (test case "path-pair-measured").
+#
+# Conflicts are not resolved: under -batch a file changed on both machines is skipped, both copies
+# stay as they are, and claude-memory-sync alerts. A file unison deletes or overwrites is kept under
+# backupdir on the machine that lost it (unison_measured.md, "Which machine keeps the copy").
+
+root = /home/filipejunqueira/containers/claude-home/.claude/projects
+root = ssh://desktop//home/filipejunqueira/containers/claude-home/.claude/projects
+
+ignore = Regex [^/]+/[^/]+
+ignorenot = Regex [^/]+/memory
+
+# unison's own ssh connection: no reused connection (~/.ssh/config has ControlMaster auto for every
+# host), no prompt, and a desktop that goes quiet mid-run is dropped instead of waited on for ever.
+sshargs = -o ControlPath=none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+# A symbolic link inside a memory folder is not copied (measured: skipped, exit 0), so nothing on one
+# machine can point a session on the other at a file outside its memory.
+links = false
+
+times = true
+backup = Name *
+backuploc = central
+backupdir = /home/filipejunqueira/.unison-backups-claude-memory
+maxbackups = 3
+confirmbigdel = true

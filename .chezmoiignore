@@ -20,6 +20,10 @@
 .local/bin/backup-age-check
 .config/systemd/user/backup-age-check.service
 .config/systemd/user/backup-age-check.timer
+.local/bin/claude-memory-sync
+.unison/claude-memory.prf
+.config/systemd/user/claude-memory-sync.service
+.config/systemd/user/claude-memory-sync.timer
 .local/bin/claude-teams
 .local/bin/ccinit
 {{- end }}

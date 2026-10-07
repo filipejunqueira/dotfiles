@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# claude-memory-sync -- keep Claude Code's per-project memory the same on the laptop and the desktop,
+# by the unison profile claude-memory (~/.unison/claude-memory.prf).
+#
+# Installed as ~/.local/bin/claude-memory-sync by pending/desktop-sessions/04_memory_land.sh and run
+# by claude-memory-sync.timer, 5 minutes after login and every 10 minutes after
+# (PLAN-desktop-sessions.md decision 3, actions 9 and 10). The laptop runs it; the desktop never does.
+#
+# Each turn, in this order; a step that says "wait" ends the turn with exit 0 and the next turn tries
+# again:
+#   1. one run at a time: a lock in $XDG_RUNTIME_DIR. Held by another run: wait.
+#   2. no Borg archive here: `pgrep -x borg` exits exactly 1 and backup-home.service is `inactive`
+#      or `failed` (PLAN-laptop-hardening.md decision 23). A running one: wait.
+#   3. no other unison here (`pgrep -x unison` exits exactly 1). vpn-sync and the peer sync run
+#      unison too, and each of them yields to the others the same way.
+#   4. one ssh call to the desktop, `pgrep -x unison` there, which is also the test of whether the
+#      desktop answers: exit 1 go on; 0 wait; 255 ssh failed, which ends quietly only when ssh says
+#      the desktop could not be reached at all (timed out, no route, network unreachable: asleep or
+#      off) and alerts for anything else, a refused key above all; any other exit alerts.
+#   5. the projects to sync: every project folder that holds at least one file under its `memory`
+#      folder, on either machine. Each becomes one `-path <project>/memory`, so unison only ever
+#      sees memory folders: a project folder, and the transcripts beside its `memory`, are never an
+#      item it could delete. With no project at all, nothing runs: unison without a `-path` would
+#      take in the whole folder of projects.
+#   6. `unison claude-memory -batch -terse` with those paths. Exit 0: done. 1: something was
+#      skipped, almost always a file changed on both machines since the last turn; both copies stay
+#      as they are, for a person or a session to merge. 2, 3 or anything else: alerted. A memory
+#      folder that vanished whole from one machine (its project removed there) stops the run with
+#      exit 3 (confirmbigdel), so nothing is deleted until a person has looked.
+# Any exit code that is not the one expected is an alert, never a pass.
+#
+# Alerts: the title and the details on the laptop's screen and in the journal; the phone gets the
+# title only, through ntfy over https with the topic read from pass at run time and never printed,
+# so no project or file name leaves the laptop. The same alert is not sent again within
+# REALERT_HOURS: an unmerged conflict would otherwise reach the phone every 10 minutes. The alert's
+# key is its kind plus the sorted paths, so a new path breaks through at once; a turn that ends in a
+# clean sync forgets the last alert.
+#
+# Usage: claude-memory-sync
+# Exit:  0 synced, or nothing to do this turn . 1 something reported . 2 could not tell (also reported)
+
+set -euo pipefail
+
+REALERT_HOURS=6
+PROFILE=claude-memory
+DESKTOP=desktop
+# Shown in alerts without this, so the paths fit the screen.
+TRIM=-home-filipejunqueira-code-
+# No reused connection (~/.ssh/config has ControlMaster auto for every host), no prompt, and a
+# connection that goes quiet is dropped. The profile's sshargs give unison's own connection the same
+# options, with a longer keepalive for a transfer.
+SSH_OPTS=(-n -o ControlPath=none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
+# What find must match, below a project folder: a file anywhere under its `memory` folder.
+MEMORY_RE='[^/]+/memory/.+'
+
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) sed -n '2,40p' "$(readlink -f "${BASH_SOURCE[0]}")"; exit 0 ;;
+        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# The user manager gives its units this socket (measured 2026-10-04, `systemctl --user
+# show-environment`); a shell from the phone exports none (CLAUDE.md, 2026-09-13).
+export SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/run/user/$(id -u)/gcr/ssh}"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-memory-sync"
+LAST="$STATE_DIR/last_alert"
+PRF="$HOME/.unison/$PROFILE.prf"
+
+say() { echo "$*"; }
+
+# hide_addresses -- ssh's own words can name the desktop's tailnet address; an alert and the journal
+# get "<address>" instead.
+hide_addresses() { sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<address>/g; s/fd7a:[0-9a-fA-F:]+/<address>/g'; }
+
+send() {
+    local title="$1" body="$2" topic=""
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name="claude-memory-sync" --urgency=critical "$title" "$body" || true
+    fi
+    topic="$(pass show api/ntfy-desktop-events 2>/dev/null | head -n1)" || topic=""
+    if [ -z "$topic" ]; then
+        say "phone alert not sent: pass gave no topic"
+        return 0
+    fi
+    curl -s -m 10 -d "$title (details on the laptop: journalctl --user -u claude-memory-sync)" \
+        "https://ntfy.sh/${topic}" >/dev/null 2>&1 || say "phone alert not sent: curl failed"
+}
+
+# alert <key> <title> <body> -- say it, and send it unless the same key went out within REALERT_HOURS.
+alert() {
+    local key="$1" title="$2" body hash now last_t="" last_h=""
+    # Cut to length first: a `head -c` after sed could stop sed mid-write, and under pipefail
+    # that would end the script before the alert went anywhere.
+    body="${3:0:400}"
+    body="$(printf '%s' "$body" | hide_addresses)"
+    say "ALERT $title -- $body"
+    hash="$(printf '%s' "$key" | sha256sum | cut -c1-16)"
+    now="$(date +%s)"
+    if [ -r "$LAST" ]; then read -r last_t last_h < "$LAST" || true; fi
+    case "$last_t" in ''|*[!0-9]*) last_t=0 ;; esac
+    if [ "$last_h" = "$hash" ] && [ $((now - last_t)) -lt $((REALERT_HOURS * 3600)) ]; then
+        say "the same alert went out at $(date -d "@$last_t" '+%a %H:%M'); not sent again within ${REALERT_HOURS} hours of it"
+        return 0
+    fi
+    mkdir -p "$STATE_DIR"
+    printf '%s %s\n' "$now" "$hash" > "$LAST"
+    send "$title" "$body"
+}
+forget() { if [ -s "$LAST" ]; then : > "$LAST"; fi; }
+
+# ssh_failed <exit> <ssh's words> <what was asked> -- end the turn after an ssh call that did not
+# give its expected answer: quietly when the desktop could not be reached, otherwise with an alert.
+ssh_failed() {
+    local rc="$1" err="$2" what="$3"
+    if [ "$rc" -eq 255 ]; then
+        case "$err" in
+            *"timed out"*|*"No route to host"*|*"Network is unreachable"*)
+                say "the desktop did not answer (ssh exit 255); nothing to sync with this turn"; exit 0 ;;
+            *"Permission denied"*|*"Host key verification failed"*|*"IDENTIFICATION HAS CHANGED"*|*"Too many authentication failures"*)
+                alert "ssh-refused" "Claude memory sync: the desktop answered and refused the laptop" \
+                    "A key or host-key problem, not a sleeping desktop. ssh said: $(printf '%s' "$err" | tail -n 3 | tr '\n' ' ')"
+                exit 1 ;;
+            *)
+                alert "ssh-other" "Claude memory sync: ssh to the desktop failed" \
+                    "Not a timeout, so not a sleeping desktop. ssh said: $(printf '%s' "$err" | tail -n 3 | tr '\n' ' ')"
+                exit 1 ;;
+        esac
+    fi
+    alert "ssh $what $rc" "Claude memory sync: could not tell ($what on the desktop)" \
+        "ssh $DESKTOP '$what' exited $rc"
+    exit 2
+}
+
+# 1. One run at a time.
+exec 9>>"$RUN_DIR/claude-memory-sync.lock"
+if ! flock -n 9; then
+    say "another claude-memory-sync run holds the lock; waiting for the next turn"
+    exit 0
+fi
+
+# 2. No Borg archive here.
+rc=0
+pgrep -x borg >/dev/null 2>&1 || rc=$?
+case "$rc" in
+    1) ;;
+    0) say "a Borg archive is running here; waiting for the next turn"; exit 0 ;;
+    *) alert "pgrep-borg $rc" "Claude memory sync: could not tell whether Borg runs" \
+           "pgrep -x borg exited $rc"
+       exit 2 ;;
+esac
+state="$(systemctl --user is-active backup-home.service 2>/dev/null)" || true
+case "$state" in
+    inactive|failed) ;;
+    active|activating|deactivating|reloading|refreshing)
+        say "backup-home.service is $state; waiting for the next turn"; exit 0 ;;
+    *) alert "backup-state $state" "Claude memory sync: could not tell whether a backup runs" \
+           "systemctl --user is-active backup-home.service printed '$state'"
+       exit 2 ;;
+esac
+
+# 3. No other unison here.
+rc=0
+pgrep -x unison >/dev/null 2>&1 || rc=$?
+case "$rc" in
+    1) ;;
+    0) say "another unison is running here; waiting for the next turn"; exit 0 ;;
+    *) alert "pgrep-unison $rc" "Claude memory sync: could not tell whether unison runs here" \
+           "pgrep -x unison exited $rc"
+       exit 2 ;;
+esac
+
+# 4. The desktop: does it answer, and is unison running there?
+rc=0
+err="$(ssh "${SSH_OPTS[@]}" "$DESKTOP" 'pgrep -x unison' 2>&1 >/dev/null)" || rc=$?
+case "$rc" in
+    1) ;;
+    0) say "unison is running on the desktop; waiting for the next turn"; exit 0 ;;
+    *) ssh_failed "$rc" "$err" "pgrep -x unison" ;;
+esac
+
+# 5. The projects that hold memory, on either machine. The two roots are read from the profile:
+#    the first is this machine's folder, the second the desktop's, after its ssh://<host>/ part.
+roots="$(sed -n 's/^root = //p' "$PRF" 2>/dev/null)" || roots=""
+here_root="$(printf '%s\n' "$roots" | sed -n 1p)"
+desk_root="$(printf '%s\n' "$roots" | sed -n 2p)"
+desk_root="${desk_root#ssh://"$DESKTOP"/}"
+if [ "$(printf '%s\n' "$roots" | grep -c .)" -ne 2 ] || [ -z "$here_root" ] || [ -z "$desk_root" ]; then
+    alert "profile-roots" "Claude memory sync: could not read the profile's two roots" \
+        "$PRF must hold exactly two 'root = ' lines."
+    exit 2
+fi
+list_cmd="cd '$desk_root' && find . -regextype posix-extended -regex '\\./$MEMORY_RE' ! -type d -printf '%P\\n'"
+here_list="$(cd "$here_root" && find . -regextype posix-extended -regex "\\./$MEMORY_RE" ! -type d -printf '%P\n')" || {
+    alert "list-here" "Claude memory sync: could not list this machine's memory files" "find under $here_root failed"
+    exit 2
+}
+rc=0
+desk_list="$(ssh "${SSH_OPTS[@]}" "$DESKTOP" "$list_cmd" 2>"$RUN_DIR/claude-memory-sync.err")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+    ssh_failed "$rc" "$(cat "$RUN_DIR/claude-memory-sync.err" 2>/dev/null)" "find memory files"
+fi
+projects="$(printf '%s\n%s\n' "$here_list" "$desk_list" | sed -n 's|^\([^/]*\)/memory/.*|\1|p' | LC_ALL=C sort -u)"
+paths=()
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+        *[!A-Za-z0-9._-]*|.|..)
+            alert "odd-name $p" "Claude memory sync: a project folder with an unexpected name" \
+                "'$p' has a character outside A-Z a-z 0-9 . _ -; nothing was synced."
+            exit 2 ;;
+    esac
+    paths+=(-path "$p/memory")
+done <<< "$projects"
+if [ "${#paths[@]}" -eq 0 ]; then
+    forget
+    say "no memory on either machine; nothing to sync"
+    exit 0
+fi
+say "projects with memory: $((${#paths[@]} / 2))"
+
+# 6. The sync.
+rc=0
+out="$(unison "$PROFILE" "${paths[@]}" -batch -terse 2>&1)" || rc=$?
+printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | hide_addresses || true
+
+# listed <skipped|failed> -- the paths unison names in its closing summary, one per line, sorted.
+# The line reads "  skipped: <path> (<reason>)" (measured on 2.54.0, 2026-10-05).
+listed() { printf '%s\n' "$out" | tr '\r' '\n' | sed -n "s/^  $1: \(.*\) ([^()]*)\$/\1/p" | LC_ALL=C sort -u; }
+short()  { sed "s/^$TRIM//" | paste -sd ',' | sed 's/,/, /g'; }
+last_words() { printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' '; }
+
+case "$rc" in
+    0) forget; say "unison exit 0: memory is the same on both machines"; exit 0 ;;
+    1)
+        skipped="$(listed skipped)"
+        if [ -z "$skipped" ]; then
+            alert "skipped-unlisted" "Claude memory sync: unison skipped something" \
+                "unison exited 1 and named no path. Its last words: $(last_words)"
+            exit 1
+        fi
+        n="$(printf '%s\n' "$skipped" | wc -l)"
+        alert "skipped $skipped" "Claude memory: $n file(s) changed on both machines" \
+            "Left as they are on each side, to merge by hand: $(printf '%s\n' "$skipped" | short)"
+        exit 1 ;;
+    2)
+        failed="$(listed failed)"
+        alert "failed $failed" "Claude memory sync: some files failed to copy" \
+            "unison exit 2. $(if [ -n "$failed" ]; then printf 'Failed: %s' "$(printf '%s\n' "$failed" | short)"; else printf 'Its last words: %s' "$(last_words)"; fi)"
+        exit 1 ;;
+    *)
+        alert "unison $rc" "Claude memory sync stopped (unison exit $rc)" \
+            "journalctl --user -u claude-memory-sync has the whole run. Its last words: $(last_words)"
+        exit 1 ;;
+esac

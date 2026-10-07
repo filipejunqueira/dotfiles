@@ -1,0 +1,24 @@
+[Unit]
+Description=Keep Claude Code's per-project memory the same on the laptop and the desktop
+Documentation=file:///home/filipejunqueira/.local/bin/claude-memory-sync
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-memory-sync
+
+# Exit 1 means "something reported" (a file changed on both machines, a copy that failed), a normal
+# outcome the script has already alerted. Exit 2 (could not tell) is left out on purpose, so it
+# shows in `systemctl --user status`.
+SuccessExitStatus=0 1
+
+# A oneshot has no start timeout unless given one. A dead link is dropped within a minute by the
+# keepalive in the profile's sshargs; this is for a run that stays connected and stalls. The lock
+# is an flock on a descriptor, so killing the run releases it and the next turn goes ahead.
+# 15 minutes is far above a turn's length: the memory folders hold a few hundred small files.
+TimeoutStartSec=15min
+
+# The phone alert reads its topic with `pass`, which works under a unit only with these two lines
+# (as backup-age-check.service has them). The screen notification needs the session bus.
+Environment=PASSWORD_STORE_DIR=%h/.local/share/pass
+Environment=GNUPGHOME=%h/.local/share/gnupg
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus

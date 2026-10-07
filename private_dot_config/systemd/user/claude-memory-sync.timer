@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync Claude Code's memory with the desktop 5 minutes after login, then every 10 minutes
+
+[Timer]
+# A few minutes after the user's own systemd starts, which on this laptop (no lingering) is the
+# first login after a boot or after every session has ended.
+OnStartupSec=5min
+# Every 10 minutes after the last run began. A run still going when that comes round is not
+# started a second time.
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

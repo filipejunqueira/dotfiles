@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# backup-desktop-age-check -- notice when the desktop's Borg backup missed its nightly run, or has
+# grown old, and say so on the screen and on the phone.
+#
+# DESKTOP ONLY. Landed by chezmoi into ~/.local/bin/backup-desktop-age-check (ignored on the
+# laptop) and run by backup-desktop-age-check.timer (PLAN-desktop-backup.md action 5, decision D6).
+# A clone of the laptop's ~/.local/bin/backup-age-check, changed only where the desktop differs.
+#
+# STRICTLY READ-ONLY. It reads the user journal by the backup's syslog identifier and asks systemd
+# about the backup's units and timer. It never starts, stops or changes a unit.
+#
+# First: while backup-desktop.service or the one-off backup-desktop-first.service is active or
+# activating, it says "running, not missed" and stops, so a first run that takes hours does not
+# alert. A run that hangs therefore keeps it quiet for as long as it hangs. Otherwise two questions:
+#   - has a backup completed since the last 03:00 that is at least GRACE_MINUTES past?
+#     The grace lets a run that is still going finish before it counts as missed. A 03:00 the
+#     nightly timer has not fired for yet is not called missed at once: after a boot or a resume the
+#     timer's catch-up run starts up to 5 minutes late (RandomizedDelaySec=300), so the check waits
+#     up to WAIT_POLLS x POLL_SECONDS for it to start. A timer that has never fired (just enabled,
+#     after a first run that ended before the last 03:00) had no 03:00 to miss; only the age counts.
+#   - is the newest completed backup under BACKUP_AGE_MAX_HOURS old?
+# What it reads: the newest "[backup] Backup complete: <archive>" line logged under the syslog
+# identifier backup-desktop, which the nightly unit and the first-run unit both carry, with its time
+# as seconds since 1970. Nothing found, a time it cannot read, or a time in the future is an alert,
+# never a pass.
+#
+# Usage: backup-desktop-age-check [--force-notify]
+# Env:   BACKUP_AGE_MAX_HOURS  how old the newest backup may be (default 48)
+# Exit:  0 nothing to say . 1 something reported . 2 could not tell (also reported)
+
+set -euo pipefail
+
+# The backup timer's schedule, written here a second time: daily at 03:00 (decision D6). Keep it
+# equal to backup-desktop.timer's OnCalendar, and change both together.
+BACKUP_TIME="03:00"
+GRACE_MINUTES=90
+WAIT_POLLS=45
+POLL_SECONDS=20
+
+MAX_HOURS="${BACKUP_AGE_MAX_HOURS:-48}"
+PATTERN='\[backup\] Backup complete: '
+FORCE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --force-notify) FORCE=1 ;;
+        -h|--help) sed -n '2,25p' "$(readlink -f "${BASH_SOURCE[0]}")"; exit 0 ;;
+        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+case "$MAX_HOURS" in
+    ''|*[!0-9]*) echo "BACKUP_AGE_MAX_HOURS is not a whole number: '$MAX_HOURS'" >&2; exit 2 ;;
+esac
+
+say() { echo "$*"; }
+
+# The screen first, then the phone, each best-effort: neither may fail the run, and the phone
+# alert's topic is read at run time and never printed. Under the unit, notify-send needs the
+# session bus and pass needs PASSWORD_STORE_DIR and GNUPGHOME (backup-desktop-age-check.service).
+notify() {
+    local title="$1" body="$2" topic=""
+    say "$title -- $body"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name="backup-desktop-age-check" --urgency=critical "$title" "$body" || true
+    fi
+    # The topic file first (DB-A3: pass cannot decrypt with nobody at a terminal on the desktop), pass second.
+    if [ -s "$HOME/.config/backup-desktop/ntfy-topic" ]; then
+        topic="$(head -n1 "$HOME/.config/backup-desktop/ntfy-topic")" || topic=""
+    else
+        topic="$(timeout 30 pass show api/ntfy-desktop-events 2>/dev/null | head -n1)" || topic=""
+    fi
+    if [ -z "$topic" ]; then
+        say "phone alert not sent: pass gave no topic"
+        return 0
+    fi
+    curl -s -m 10 -d "$title -- $body" "https://ntfy.sh/${topic}" >/dev/null 2>&1 \
+        || say "phone alert not sent: curl failed"
+}
+
+# hm <seconds> -- "12.3" hours, for the text.
+hm() { awk -v s="$1" 'BEGIN { printf "%.1f", s / 3600 }'; }
+when() { date -d "@$1" '+%a %Y-%m-%d %H:%M'; }
+
+# The timer's state and next run as systemd reports them, for the alert text only.
+timer_state() {
+    local out
+    out="$(systemctl --user show backup-desktop.timer -p ActiveState -p NextElapseUSecRealtime 2>/dev/null)" \
+        || out=""
+    [ -n "$out" ] || out="systemd gave no answer"
+    printf '%s' "$out" | tr '\n' ' '
+}
+
+# A backup still running is not a missed one. Only the printed word decides: is-active exits
+# non-zero for "activating", the state a oneshot unit holds while it runs, and an answer it cannot
+# give (no bus, an error) prints nothing, which is not "running", so the check goes on.
+exit_if_running() {
+    local unit state
+    for unit in backup-desktop.service backup-desktop-first.service; do
+        state="$(systemctl --user is-active "$unit" 2>/dev/null)" || true
+        case "$state" in
+            active|activating) say "running, not missed: $unit is $state"; exit 0 ;;
+        esac
+    done
+}
+exit_if_running
+
+NOW="$(date +%s)"
+
+# last_due_slot -- the newest scheduled time S with S + GRACE_MINUTES <= NOW: today's or
+# yesterday's 03:00. Prints nothing if there is none.
+last_due_slot() {
+    local today d day s
+    today="$(date -d "@$NOW" +%F)"
+    for d in 0 1; do
+        day="$(date -d "$today -$d days" +%F)"
+        s="$(date -d "$day $BACKUP_TIME" +%s)"
+        if [ $((s + GRACE_MINUTES * 60)) -le "$NOW" ]; then
+            printf '%s' "$s"
+            return 0
+        fi
+    done
+}
+
+# By syslog identifier AND by unit: the nightly backup-desktop.service and the one-off
+# backup-desktop-first unit both log as backup-desktop (-u would see only one of them), and two
+# _SYSTEMD_USER_UNIT matches on the same field are OR-ed and AND-ed with -t, so a line written by
+# `logger -t backup-desktop` from anywhere else is not believed (cartman-security, DB-A4).
+ask_journal() {
+    journalctl -q --user -t backup-desktop \
+        _SYSTEMD_USER_UNIT=backup-desktop.service _SYSTEMD_USER_UNIT=backup-desktop-first.service \
+        -g "$PATTERN" -r -n1 -o short-unix --no-pager
+}
+read_newest() {
+    line=""
+    err=""
+    local rc=0 stamp
+    # Asked twice, once for the answer and once for any complaint, so that no file is needed to keep
+    # the two apart.
+    line="$(ask_journal 2>/dev/null)" || rc=$?
+    err="$(ask_journal 2>&1 >/dev/null)" || true
+
+    # journalctl exits 1 both for "no line matched" and for "could not read the journal", and 0 with
+    # an empty answer for a unit it does not know. So stderr decides "could not tell", and an empty
+    # answer is never a pass.
+    if [ -n "$err" ]; then
+        notify "Desktop backup check: could not read the journal" \
+    "journalctl said: $(printf '%s' "$err" | head -c 300 | tr '\n' ' ') (exit $rc). Timer: $(timer_state)"
+        exit 2
+    fi
+    if [ -z "$line" ]; then
+        notify "Desktop backup: no completed backup on record" \
+    "The journal holds no '[backup] Backup complete:' line under backup-desktop. Timer: $(timer_state)"
+        exit 1
+    fi
+
+    stamp="${line%% *}"
+    case "$stamp" in
+        [0-9]*.[0-9]*|[0-9]*) ;;
+        *) stamp="" ;;
+    esac
+    newest="${stamp%%.*}"
+    case "$newest" in
+        ''|*[!0-9]*)
+            notify "Desktop backup check: could not read the time of the newest backup" \
+    "The journal line was: ${line:0:200}. Timer: $(timer_state)"
+            exit 2 ;;
+    esac
+    if [ "$newest" -gt "$NOW" ]; then
+        notify "Desktop backup check: the newest backup is dated in the future" \
+    "$(when "$newest") is after now, $(when "$NOW"). Timer: $(timer_state)"
+        exit 2
+    fi
+}
+read_newest
+
+age=$((NOW - newest))
+say "newest completed backup: $(when "$newest") ($(hm "$age") h ago; limit ${MAX_HOURS} h)"
+
+slot="$(last_due_slot)"
+if [ -z "$slot" ]; then
+    notify "Desktop backup check: could not work out the last scheduled time" \
+"Daily at '$BACKUP_TIME'. Newest backup $(when "$newest"). Timer: $(timer_state)"
+    exit 2
+fi
+
+# When the nightly timer last fired, as seconds since 1970: "@<seconds>" from systemd, or nothing for
+# a timer that has never fired (or is not loaded).
+last_trigger() {
+    local v
+    v="$(systemctl --user show backup-desktop.timer -p LastTriggerUSec --timestamp=unix --value 2>/dev/null)" || v=""
+    case "$v" in
+        @[0-9]*) v="${v#@}"; case "$v" in *[!0-9]*) ;; *) printf '%s' "$v" ;; esac ;;
+    esac
+}
+
+problems=()
+if [ "$newest" -lt "$slot" ]; then
+    fired="$(last_trigger)"
+    if [ -z "$fired" ]; then
+        say "the nightly timer has not fired yet, so $(when "$slot") is not called missed; only the age counts"
+    else
+        # The timer has not fired since the slot: its catch-up after a boot or resume may be about to
+        # start. Wait for it, and stop waiting once it has fired.
+        i=0
+        while [ "$fired" -lt "$slot" ] && [ "$i" -lt "$WAIT_POLLS" ]; do
+            sleep "$POLL_SECONDS"
+            i=$((i + 1))
+            exit_if_running
+            fired="$(last_trigger)"
+            [ -n "$fired" ] || fired=0
+        done
+        if [ "$i" -gt 0 ]; then
+            say "waited $((i * POLL_SECONDS)) s for the nightly timer's catch-up run"
+            NOW="$(date +%s)"
+            read_newest
+            age=$((NOW - newest))
+            say "newest completed backup: $(when "$newest") ($(hm "$age") h ago; limit ${MAX_HOURS} h)"
+        fi
+        if [ "$newest" -lt "$slot" ]; then
+            problems+=("no backup has completed since the one scheduled for $(when "$slot")")
+        fi
+    fi
+fi
+if [ "$age" -gt $((MAX_HOURS * 3600)) ]; then
+    problems+=("the newest backup is $(hm "$age") hours old, over the limit of ${MAX_HOURS}")
+fi
+if [ "$FORCE" -eq 1 ] && [ "${#problems[@]}" -eq 0 ]; then
+    problems+=("a test alert (--force-notify); nothing is wrong")
+fi
+
+if [ "${#problems[@]}" -eq 0 ]; then
+    say "up to date: completed after the scheduled time of $(when "$slot")"
+    exit 0
+fi
+body="${problems[0]}"
+for p in "${problems[@]:1}"; do body="$body; $p"; done
+notify "Desktop backup: $body" \
+"Newest completed backup $(when "$newest"), $(hm "$age") hours ago (limit ${MAX_HOURS}). Timer: $(timer_state)"
+exit 1

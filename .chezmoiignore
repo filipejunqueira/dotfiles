@@ -44,4 +44,12 @@
 # The laptop keeps gnome-keyring's SSH agent; the ssh-agent user unit is desktop-only (13d.1 script 19)
 {{- if eq .machine_type "laptop" }}
 .config/systemd/user/ssh-agent.service
+.local/bin/backup-desktop
+.local/bin/backup-desktop-age-check
+.config/systemd/user/backup-desktop.service
+.config/systemd/user/backup-desktop.timer
+.config/systemd/user/backup-desktop-age-check.service
+.config/systemd/user/backup-desktop-age-check.timer
+.config/backup-desktop/exclude.txt
+.config/backup-desktop
 {{- end }}

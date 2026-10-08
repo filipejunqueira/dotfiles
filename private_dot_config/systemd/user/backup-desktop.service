@@ -1,0 +1,19 @@
+[Unit]
+Description=Borg backup of the desktop's home and /mnt/calculations into /mnt/vault1/borg-desktop
+Documentation=file:///home/filipejunqueira/.local/bin/backup-desktop
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/backup-desktop
+# The missed-run check and the first run's transient unit share this name: journalctl --user -t backup-desktop
+SyslogIdentifier=backup-desktop
+
+# A oneshot has no start timeout unless given one. A nightly run is minutes; a large first run, or a night
+# after a big copy into the home, can be hours on a spinning drive (PLAN-desktop-backup.md D4).
+TimeoutStartSec=24h
+
+# borg's passphrase and the phone alert's topic come from `pass`, which works under a unit only with these
+# two lines (as the laptop's backup-home.service has them). The screen notification needs the session bus.
+Environment=PASSWORD_STORE_DIR=%h/.local/share/pass
+Environment=GNUPGHOME=%h/.local/share/gnupg
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus

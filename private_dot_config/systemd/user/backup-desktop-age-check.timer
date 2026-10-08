@@ -1,0 +1,16 @@
+[Unit]
+Description=Check the desktop's backup each morning and after each start of the user manager
+
+[Timer]
+# 09:00 daily, six hours after the backup's own 03:00, well past the check's 90-minute grace.
+OnCalendar=*-*-* 09:00:00
+
+# A few minutes after the user's own systemd starts. The desktop has lingering on, so that is
+# each boot, not each login.
+OnStartupSec=5min
+
+# A check time missed while the machine was off is run when the timer next starts.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

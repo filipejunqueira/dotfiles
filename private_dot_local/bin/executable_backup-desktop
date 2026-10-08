@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# backup-desktop: a Borg backup of the desktop's home and /mnt/calculations into /mnt/vault1/borg-desktop.
+# PLAN-desktop-backup.md (chapter desktop-backup), decisions D1 to D6. Desktop only: chezmoi lands it as
+# ~/.local/bin/backup-desktop and keeps it off the laptop (laptop block of .chezmoiignore).
+#
+# Run by backup-desktop.service (backup-desktop.timer, daily 03:00), and once by hand as the transient unit
+# backup-desktop-first (action 19). Both set SyslogIdentifier=backup-desktop, so every line below is in
+#   journalctl --user -t backup-desktop
+# and the missed-run check reads the success line, "[backup] Backup complete: <archive>", from there.
+#
+# A BACKUP, not a sync: nothing here copies anything to the laptop. It reads the two sources and writes
+# only the repo on vault1. The one thing that deletes is prune and compact, archives of this repo only.
+#
+# Exit codes: 0 done (borg warnings, rc 1, are logged and allowed, as on the laptop); 1 a check failed
+# before borg ran, or borg failed (rc 2 or more); 3 gave up waiting for the laptop's push to end. Every
+# non-zero exit sends one alert: the screen, and the phone over https://ntfy.sh.
+set -euo pipefail
+
+# The fixed places. test_backup_desktop.sh runs a copy with these three lines rewritten into its own tree.
+VAULT=/mnt/vault1
+CALC=/mnt/calculations
+EXCLUDE="$HOME/.config/backup-desktop/exclude.txt"
+
+REPO="$VAULT/borg-desktop"
+WAIT_MAX_SECONDS=3600   # how long to wait for the laptop's push to end before giving up (D4)
+WAIT_STEP_SECONDS=60
+
+export PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-$HOME/.local/share/pass}"
+export GNUPGHOME="${GNUPGHOME:-$HOME/.local/share/gnupg}"
+# The passphrase comes from a file only this user can read (PLAN-desktop-backup.md D2's fallback, DB-A3):
+# the desktop's gpg key wants its own passphrase, so `pass` cannot decrypt with nobody at a terminal, and the
+# first-run proof showed it ("gpg: public key decryption failed", 2026-10-07 19:03). 07_first_run_desk.sh
+# writes both files from pass once, with a person present. The ntfy topic is read the same way, with pass as
+# a fallback under a timeout, so an alert can still go out when the file is missing.
+PASSFILE="$HOME/.config/backup-desktop/passphrase"
+TOPICFILE="$HOME/.config/backup-desktop/ntfy-topic"
+export BORG_PASSCOMMAND="cat $PASSFILE"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [backup] $*"; }
+
+ALERTED=0
+alert() {
+  local msg="desktop backup: $*" topic=""
+  ALERTED=1
+  notify-send --urgency=critical "Desktop backup" "$msg" 2>/dev/null || true
+  if [ -s "$TOPICFILE" ]; then
+    topic=$(sed -n 1p "$TOPICFILE") || topic=""
+  else
+    topic=$(timeout 30 pass show api/ntfy-desktop-events 2>/dev/null | sed -n 1p) || topic=""
+  fi
+  if [ -n "$topic" ]; then
+    curl -s -m 10 -d "$msg" "https://ntfy.sh/$topic" >/dev/null 2>&1 || true
+  else
+    log "WARNING: no ntfy topic from pass, the phone was not told"
+  fi
+}
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && [ "$ALERTED" = 0 ]; then
+    alert "FAILED $(date +%H:%M), exit $rc. Read: journalctl --user -t backup-desktop"
+  fi
+}
+trap on_exit EXIT
+fail() { log "ERROR: $*"; alert "FAILED $(date +%H:%M): $*"; exit 1; }
+
+# The repo is this one and no other: an inherited BORG_REPO naming anything else (the laptop's repo on
+# vault_backup above all) is refused rather than obeyed.
+if [ -n "${BORG_REPO:-}" ] && [ "$BORG_REPO" != "$REPO" ]; then
+  fail "BORG_REPO is set to '$BORG_REPO', and this script writes only to $REPO"
+fi
+export BORG_REPO="$REPO"
+
+# ---- checks, all before borg runs -------------------------------------------------------------------
+# One findmnt per mount (a multi-target findmnt exits non-zero). -t ext4 refuses an empty mount point:
+# both drives are nofail, and an archive of an unmounted /mnt/calculations would be an empty tree that
+# prune would later let replace the last good one.
+findmnt -n -t ext4 "$CALC" >/dev/null 2>&1 || fail "$CALC is not mounted (ext4), nothing was archived"
+findmnt -n -t ext4 "$VAULT" >/dev/null 2>&1 || fail "$VAULT is not mounted (ext4), nothing was archived"
+[ -w "$VAULT" ] || fail "$VAULT is not writable by $(id -un)"
+[ -f "$REPO/config" ] && [ -d "$REPO/data" ] || fail "no Borg repo at $REPO (config and data/ expected)"
+[ -s "$EXCLUDE" ] || fail "the exclude file $EXCLUDE is missing or empty"
+[ -s "$PASSFILE" ] || fail "the passphrase file $PASSFILE is missing or empty (07_first_run_desk.sh writes it)"
+[ "$(stat -c %a "$PASSFILE")" = 600 ] || fail "the passphrase file $PASSFILE is not mode 600"
+
+# ---- wait while the laptop pushes ---------------------------------------------------------------------
+# Two reasons to wait (D4). Any borg process here: the laptop's `borg serve` during its push, or another
+# run of this script. And the clock inside a push window on a push day, which catches a catch-up run
+# (Persistent=true) started by the 10:55 wake before the laptop's borg serve has begun. pgrep exits 1
+# for none, 0 for some; any other code is not an answer and counts as busy.
+in_push_window() {
+  local now dow hm
+  now=$(date +%u%H%M)
+  dow=${now:0:1}
+  hm=$((10#${now:1}))
+  case "$dow" in 2|4|6|7) ;; *) return 1 ;; esac
+  { [ "$hm" -ge 1050 ] && [ "$hm" -le 1145 ]; } ||
+    { [ "$hm" -ge 1450 ] && [ "$hm" -le 1545 ]; } ||
+    { [ "$hm" -ge 1850 ] && [ "$hm" -le 1945 ]; }
+}
+busy_reason() {
+  local rc=0
+  pgrep -x borg >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    1) ;;
+    0) echo "a borg process is running here"; return 0 ;;
+    *) echo "pgrep exited $rc, which is not an answer about borg"; return 0 ;;
+  esac
+  if in_push_window; then echo "inside the laptop's push window"; return 0; fi
+  return 1
+}
+start=$(date +%s)
+while reason=$(busy_reason); do
+  waited=$(( $(date +%s) - start ))
+  if [ "$waited" -ge "$WAIT_MAX_SECONDS" ]; then
+    log "ERROR: still waiting after ${waited}s: $reason"
+    alert "SKIPPED $(date +%H:%M): waited ${waited}s and still $reason; the next timer run will try again"
+    exit 3
+  fi
+  log "waiting: $reason (${waited}s so far)"
+  sleep "$WAIT_STEP_SECONDS"
+done
+
+# ---- the archive -------------------------------------------------------------------------------------------
+# The day is read once, now: a Sunday run that ends after midnight still checks, a Saturday one does not.
+DOW_AT_START=$(date +%u)
+ARCHIVE="$(hostname)-$(date +%Y-%m-%dT%H:%M:%S)"
+log "Creating archive: $ARCHIVE (sources: $HOME $CALC)"
+rc=0
+# --one-file-system is per source: borg takes each root's own device (archiver.py:677), so the home stays
+# on the root NVMe and /mnt/calculations on its own, and no other drive is ever crossed into.
+nice -n 10 ionice -c2 -n7 borg create --verbose --stats --show-rc \
+  --one-file-system --compression zstd,3 --exclude-caches --exclude-from "$EXCLUDE" \
+  "::$ARCHIVE" "$HOME" "$CALC" 2>&1 || rc=$?
+[ "$rc" -le 1 ] || fail "borg create exited $rc for $ARCHIVE"
+[ "$rc" -eq 0 ] || log "WARNING: borg create exited 1 (warnings above); the archive was written"
+
+rc=0
+log "Pruning old archives..."
+borg prune --list --show-rc --glob-archives "$(hostname)-*" \
+  --keep-within 2d --keep-daily 14 --keep-weekly 8 --keep-monthly 6 2>&1 || rc=$?
+[ "$rc" -le 1 ] || fail "borg prune exited $rc"
+
+rc=0
+borg compact 2>&1 || rc=$?
+[ "$rc" -le 1 ] || fail "borg compact exited $rc"
+
+# The repository check reads the whole repo from a spinning drive, so it runs on Sundays only (D5).
+if [ "$DOW_AT_START" = 7 ]; then
+  rc=0
+  t0=$(date +%s)
+  log "Sunday: checking the repository..."
+  borg check --repository-only --show-rc 2>&1 || rc=$?
+  [ "$rc" -le 1 ] || fail "borg check exited $rc"
+  log "Repository check passed in $(( $(date +%s) - t0 ))s"
+fi
+
+log "Backup complete: $ARCHIVE"
+notify-send "Desktop backup complete" "$ARCHIVE" 2>/dev/null || true

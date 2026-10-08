@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Borg backup of the desktop (PLAN-desktop-backup.md D4)
+
+[Timer]
+# 03:00 is far from the laptop's pushes (Tue, Thu, Sat, Sun at 11:00, 15:00, 19:00) and from the 10:55 wake.
+# Persistent runs a missed night when the desktop is back; the script then waits out any push window.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

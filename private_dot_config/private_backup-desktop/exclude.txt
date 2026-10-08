@@ -1,0 +1,55 @@
+# exclude-desktop.txt: what the desktop's Borg backup leaves out (PLAN-desktop-backup.md decision D3).
+# Landed by chezmoi as ~/.config/backup-desktop/exclude.txt and read by ~/.local/bin/backup-desktop.
+#
+# Every pattern is ANCHORED to the home, home/filipejunqueira/..., because the same archive also holds
+# /mnt/calculations: an unanchored sh:**/build/ or sh:**/*.so would silently drop matching folders
+# under cp2k and vasp. Borg matches against the path without its leading slash, and a trailing slash
+# drops a folder's contents but keeps the folder (borg patterns.py:281-293, borg 1.4.5).
+# check_excludes.py, beside the scripts, proves each line against borg's own matcher.
+#
+# The first 33 lines are the laptop's /etc/borg/exclude-home.txt as read on 2026-10-07, with sh:**/
+# anchored to the home; the four after them are the desktop's own, and the last is the calculations drive's
+# lost+found.
+sh:home/filipejunqueira/**/.cache
+sh:home/filipejunqueira/**/.thumbnails
+sh:home/filipejunqueira/**/Cache
+sh:home/filipejunqueira/**/GPUCache
+sh:home/filipejunqueira/**/ShaderCache
+sh:home/filipejunqueira/**/.local/share/Trash
+sh:home/filipejunqueira/**/node_modules
+sh:home/filipejunqueira/**/.npm
+sh:home/filipejunqueira/**/__pycache__
+sh:home/filipejunqueira/**/*.pyc
+sh:home/filipejunqueira/**/.venv
+sh:home/filipejunqueira/**/venv
+sh:home/filipejunqueira/**/miniforge3/envs
+sh:home/filipejunqueira/**/miniforge3/pkgs
+sh:home/filipejunqueira/**/.cargo/registry
+sh:home/filipejunqueira/**/.cargo/git
+sh:home/filipejunqueira/**/.rustup/toolchains
+sh:home/filipejunqueira/**/go/pkg
+sh:home/filipejunqueira/**/.mozilla/firefox/*/cache2
+sh:home/filipejunqueira/**/.mozilla/firefox/*/storage
+sh:home/filipejunqueira/**/.config/chromium/*/Service Worker
+sh:home/filipejunqueira/**/.local/share/baloo
+sh:home/filipejunqueira/**/.config/Code/CachedData
+sh:home/filipejunqueira/**/.config/Code/logs
+sh:home/filipejunqueira/**/.config/**/GPUCache
+sh:home/filipejunqueira/**/build/
+sh:home/filipejunqueira/**/dist/
+sh:home/filipejunqueira/**/target/
+sh:home/filipejunqueira/**/*.o
+sh:home/filipejunqueira/**/*.so
+sh:home/filipejunqueira/**/.local/share/docker
+sh:home/filipejunqueira/**/.local/share/containers
+sh:home/filipejunqueira/**/.local/share/Steam/steamapps
+# The desktop's own (D3): Steam whole (83G, the laptop drops only steamapps), Flatpak runtimes,
+# per-app caches under .var, and the Claude Desktop app's VM images (12G).
+sh:home/filipejunqueira/.local/share/Steam
+sh:home/filipejunqueira/.local/share/flatpak
+sh:home/filipejunqueira/.var/app/*/cache
+sh:home/filipejunqueira/.config/Claude/vm_bundles
+# The calculations drive's lost+found belongs to root and cannot be opened, so borg warned (exit 1) about it
+# on the first run (2026-10-07 22:10) and would on every night after; a warning that is always there hides a
+# real one (DB-A4). The one line here not anchored to the home, allowed by name in check_excludes.py.
+sh:mnt/calculations/lost+found

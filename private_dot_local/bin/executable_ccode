@@ -22,14 +22,16 @@ Options:
   -l, --login         Run claude login (OAuth via browser)
   -e, --enter         Enter the container shell (no Claude Code)
   -f, --fleet         Open the session roster (FleetView) instead of a new session
-  -n, --new           Force a brand-new session — the DEFAULT; kept for habit
       --global-config Start in the config repository, ~/containers/claude-home/.claude
+      --no-teams      Agent teams off for this launch only; \`claude-teams status\` still
+                      reads the folder's own setting
   -h, --help          Show this help
 
 
 Examples:
   cc                  New session in the current directory
   cc --global-config  New session in the config repository, from any folder
+  cc -n myname        New session named myname (-n is claude's own --name)
   cc -f               Pick from running sessions instead
   cc -u               Update Claude Code to latest
   cc -l               Re-authenticate via browser
@@ -49,19 +51,25 @@ check_container() {
     fi
 }
 
+# Every `distrobox enter` takes -nw: without it distrobox builds --workdir from $PWD into
+# an option list it later splits on newlines, so a folder name holding a newline would
+# add options of its own to `podman exec`. The folder goes over as an argument instead.
 enter_shell() {
-    distrobox enter "$CONTAINER_NAME"
+    # The login shell distrobox itself starts when given no command.
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'cd -- "$1" || exit 1
+s="$(getent passwd "$(id -un)" | cut -d: -f7)"
+exec "${s:-/bin/bash}" -l' ccode "$PWD"
 }
 
 update_claude() {
     echo -e "${YELLOW}Updating Claude Code...${NC}"
-    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://claude.ai/install.sh | bash'
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://claude.ai/install.sh | bash'
     echo -e "${GREEN}Done. New version:${NC}"
-    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude --version'
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude --version'
 }
 
 run_login() {
-    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude login'
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude login'
 }
 
 run_claude() {
@@ -69,19 +77,31 @@ run_claude() {
     local -a args=()
     # A passthrough that already picks a session wins. `--session-id <new>` alongside
     # --resume or --continue is a contradiction, so do not inject one on top of them.
-    local a picks_session=0
+    # The word after -n or --name is a name, whatever it looks like.
+    local a prev="" picks_session=0 own_settings=0
     for a in "$@"; do
-        case "$a" in
-        -r | --resume | -c | --continue | --session-id | --fork-session) picks_session=1 ;;
-        esac
+        if [[ $prev != -n && $prev != --name ]]; then
+            case "$a" in
+            -r | --resume | -c | --continue | --session-id | --fork-session) picks_session=1 ;;
+            --settings | --settings=*) own_settings=1 ;;
+            esac
+        fi
+        prev="$a"
     done
+    # claude keeps the last --settings it is given, so one of his own would undo this.
+    if ((NO_TEAMS && own_settings)); then
+        echo -e "${RED}ccode: --no-teams cannot go with a --settings of your own; put the teams variable in that file${NC}" >&2
+        exit 1
+    fi
     ((NEW_SESSION && !picks_session)) && args+=(--session-id "$(uuidgen)")
+    ((NO_TEAMS)) && args+=(--settings '{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"0"}}')
     args+=("$@")
-    # `printf ' %q'` with an empty array still prints once, against an empty string, so an
-    # unguarded expansion hands claude a stray '' — an empty prompt on every bare `cc`.
-    local cmd="claude"
-    ((${#args[@]})) && cmd+="$(printf ' %q' "${args[@]}")"
-    distrobox enter "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; cd "'"$host_cwd"'" 2>/dev/null && '"$cmd"
+    # The folder and the arguments travel as arguments, never as shell text: a folder named
+    # `a$(cmd)b` would otherwise run cmd. distrobox hands them on to `podman exec` whole.
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"
+cd -- "$1" || { echo "ccode: the container cannot enter $1" >&2; exit 1; }
+shift
+claude "$@"' ccode "$host_cwd" "${args[@]}"
 }
 
 render_claude_json() {
@@ -115,6 +135,8 @@ NEW_SESSION=1
 # The folder the session starts in. --global-config swaps it for the config repository,
 # so that one command opens it from anywhere.
 START_DIR="$PWD"
+# --settings sits above every settings file, so it beats a folder's own teams setting.
+NO_TEAMS=0
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -137,11 +159,16 @@ while [[ $# -gt 0 ]]; do
         ;;
     --)
         shift
-        CLAUDE_ARGS=("$@")
+        CLAUDE_ARGS+=("$@")
         break
         ;;
-    -n | --new)
-        NEW_SESSION=1
+    --no-teams)
+        NO_TEAMS=1
+        shift
+        ;;
+    --new)
+        # Retired with -n, which is claude's own --name now; a new session is the default.
+        echo -e "${YELLOW}ccode: --new is retired; a new session is the default${NC}" >&2
         shift
         ;;
     --global-config)

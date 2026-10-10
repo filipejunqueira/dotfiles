@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# claude-memory-sync -- keep Claude Code's per-project memory the same on the laptop and the desktop,
-# by the unison profile claude-memory (~/.unison/claude-memory.prf).
+# claude-memory-sync -- keep Claude Code's per-project memory and conversations the same on the laptop
+# and the desktop, by the unison profile claude-memory (~/.unison/claude-memory.prf).
 #
 # Installed as ~/.local/bin/claude-memory-sync by pending/desktop-sessions/04_memory_land.sh and run
 # by claude-memory-sync.timer, 5 minutes after login and every 10 minutes after
-# (PLAN-desktop-sessions.md decision 3, actions 9 and 10). The laptop runs it; the desktop never does.
+# (PLAN-desktop-sessions.md decision 3, actions 9 and 10; conversations since action 25). The laptop
+# runs it; the desktop never does.
 #
 # Each turn, in this order; a step that says "wait" ends the turn with exit 0 and the next turn tries
 # again:
@@ -13,20 +14,26 @@
 #      or `failed` (PLAN-laptop-hardening.md decision 23). A running one: wait.
 #   3. no other unison here (`pgrep -x unison` exits exactly 1). vpn-sync and the peer sync run
 #      unison too, and each of them yields to the others the same way.
-#   4. one ssh call to the desktop, `pgrep -x unison` there, which is also the test of whether the
+#   4. one ssh call to the desktop, `pgrep -x 'unison|borg'` there (a unison, or the desktop's own
+#      nightly Borg backup), which is also the test of whether the
 #      desktop answers: exit 1 go on; 0 wait; 255 ssh failed, which ends quietly only when ssh says
 #      the desktop could not be reached at all (timed out, no route, network unreachable: asleep or
 #      off) and alerts for anything else, a refused key above all; any other exit alerts.
-#   5. the projects to sync: every project folder that holds at least one file under its `memory`
-#      folder, on either machine. Each becomes one `-path <project>/memory`, so unison only ever
-#      sees memory folders: a project folder, and the transcripts beside its `memory`, are never an
-#      item it could delete. With no project at all, nothing runs: unison without a `-path` would
-#      take in the whole folder of projects.
+#   5. the projects to sync: every project folder that holds a file under its `memory` folder or a
+#      conversation file (`<session id>.jsonl`) directly inside it, on either machine. Each becomes
+#      one `-path <project>`, and the profile's fence decides what inside it travels. With no
+#      project at all, nothing runs: unison without a `-path` would take in the whole folder of
+#      projects.
 #   6. `unison claude-memory -batch -terse` with those paths. Exit 0: done. 1: something was
 #      skipped, almost always a file changed on both machines since the last turn; both copies stay
-#      as they are, for a person or a session to merge. 2, 3 or anything else: alerted. A memory
-#      folder that vanished whole from one machine (its project removed there) stops the run with
-#      exit 3 (confirmbigdel), so nothing is deleted until a person has looked.
+#      as they are, for a person or a session to merge. A conversation a live session was still
+#      writing while unison copied it comes back as exit 1 with the item "partially transferred"
+#      (measure_live_write.sh) or as exit 2 with "has been modified during synchronization"
+#      (test_memory_sync.sh, case live-write); when nothing was skipped and every failure is that
+#      one, the file waits for the next turn, quietly, until such turns have gone on unbroken for
+#      PARTIAL_HOURS, then it is alerted. 2, 3 or anything else: alerted. A
+#      project folder that vanished whole from one machine (its project removed there) stops the
+#      run with exit 3 (confirmbigdel), so nothing is deleted until a person has looked.
 # Any exit code that is not the one expected is an alert, never a pass.
 #
 # Alerts: the title and the details on the laptop's screen and in the journal; the phone gets the
@@ -42,6 +49,7 @@
 set -euo pipefail
 
 REALERT_HOURS=6
+PARTIAL_HOURS=6
 PROFILE=claude-memory
 DESKTOP=desktop
 # Shown in alerts without this, so the paths fit the screen.
@@ -50,12 +58,16 @@ TRIM=-home-filipejunqueira-code-
 # connection that goes quiet is dropped. The profile's sshargs give unison's own connection the same
 # options, with a longer keepalive for a transfer.
 SSH_OPTS=(-n -o ControlPath=none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
-# What find must match, below a project folder: a file anywhere under its `memory` folder.
-MEMORY_RE='[^/]+/memory/.+'
+# What find must match, below the folder of projects: a file anywhere under a project's `memory`
+# folder, or a conversation file directly inside a project folder (the profile's fence, as find
+# writes it).
+ITEM_RE='[^/]+/(memory/.+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl)'
+# Asked on the desktop in one ssh call: is a unison or a Borg running there?
+DESK_BUSY="pgrep -x 'unison|borg'"
 
 for arg in "$@"; do
     case "$arg" in
-        -h|--help) sed -n '2,40p' "$(readlink -f "${BASH_SOURCE[0]}")"; exit 0 ;;
+        -h|--help) sed -n '2,/^$/p' "$(readlink -f "${BASH_SOURCE[0]}")"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -66,6 +78,7 @@ export SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/run/user/$(id -u)/gcr/ssh}"
 RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-memory-sync"
 LAST="$STATE_DIR/last_alert"
+PARTIAL="$STATE_DIR/partial_since"
 PRF="$HOME/.unison/$PROFILE.prf"
 
 say() { echo "$*"; }
@@ -108,7 +121,7 @@ alert() {
     printf '%s %s\n' "$now" "$hash" > "$LAST"
     send "$title" "$body"
 }
-forget() { if [ -s "$LAST" ]; then : > "$LAST"; fi; }
+forget() { if [ -s "$LAST" ]; then : > "$LAST"; fi; if [ -s "$PARTIAL" ]; then : > "$PARTIAL"; fi; }
 
 # ssh_failed <exit> <ssh's words> <what was asked> -- end the turn after an ssh call that did not
 # give its expected answer: quietly when the desktop could not be reached, otherwise with an alert.
@@ -171,16 +184,17 @@ case "$rc" in
        exit 2 ;;
 esac
 
-# 4. The desktop: does it answer, and is unison running there?
+# 4. The desktop: does it answer, and is a unison or a Borg running there?
 rc=0
-err="$(ssh "${SSH_OPTS[@]}" "$DESKTOP" 'pgrep -x unison' 2>&1 >/dev/null)" || rc=$?
+err="$(ssh "${SSH_OPTS[@]}" "$DESKTOP" "$DESK_BUSY" 2>&1 >/dev/null)" || rc=$?
 case "$rc" in
     1) ;;
-    0) say "unison is running on the desktop; waiting for the next turn"; exit 0 ;;
-    *) ssh_failed "$rc" "$err" "pgrep -x unison" ;;
+    0) say "unison or Borg is running on the desktop; waiting for the next turn"; exit 0 ;;
+    *) ssh_failed "$rc" "$err" "unison or Borg" ;;
 esac
 
-# 5. The projects that hold memory, on either machine. The two roots are read from the profile:
+# 5. The projects that hold memory or a conversation, on either machine. The two roots are read
+#    from the profile:
 #    the first is this machine's folder, the second the desktop's, after its ssh://<host>/ part.
 roots="$(sed -n 's/^root = //p' "$PRF" 2>/dev/null)" || roots=""
 here_root="$(printf '%s\n' "$roots" | sed -n 1p)"
@@ -191,17 +205,17 @@ if [ "$(printf '%s\n' "$roots" | grep -c .)" -ne 2 ] || [ -z "$here_root" ] || [
         "$PRF must hold exactly two 'root = ' lines."
     exit 2
 fi
-list_cmd="cd '$desk_root' && find . -regextype posix-extended -regex '\\./$MEMORY_RE' ! -type d -printf '%P\\n'"
-here_list="$(cd "$here_root" && find . -regextype posix-extended -regex "\\./$MEMORY_RE" ! -type d -printf '%P\n')" || {
-    alert "list-here" "Claude memory sync: could not list this machine's memory files" "find under $here_root failed"
+list_cmd="cd '$desk_root' && find . -regextype posix-extended -regex '\\./$ITEM_RE' ! -type d -printf '%P\\n'"
+here_list="$(cd "$here_root" && find . -regextype posix-extended -regex "\\./$ITEM_RE" ! -type d -printf '%P\n')" || {
+    alert "list-here" "Claude memory sync: could not list this machine's memory and conversations" "find under $here_root failed"
     exit 2
 }
 rc=0
 desk_list="$(ssh "${SSH_OPTS[@]}" "$DESKTOP" "$list_cmd" 2>"$RUN_DIR/claude-memory-sync.err")" || rc=$?
 if [ "$rc" -ne 0 ]; then
-    ssh_failed "$rc" "$(cat "$RUN_DIR/claude-memory-sync.err" 2>/dev/null)" "find memory files"
+    ssh_failed "$rc" "$(cat "$RUN_DIR/claude-memory-sync.err" 2>/dev/null)" "find memory and conversations"
 fi
-projects="$(printf '%s\n%s\n' "$here_list" "$desk_list" | sed -n 's|^\([^/]*\)/memory/.*|\1|p' | LC_ALL=C sort -u)"
+projects="$(printf '%s\n%s\n' "$here_list" "$desk_list" | sed -n 's|^\([^/]*\)/.*|\1|p' | LC_ALL=C sort -u)"
 paths=()
 while IFS= read -r p; do
     [ -n "$p" ] || continue
@@ -211,14 +225,14 @@ while IFS= read -r p; do
                 "'$p' has a character outside A-Z a-z 0-9 . _ -; nothing was synced."
             exit 2 ;;
     esac
-    paths+=(-path "$p/memory")
+    paths+=(-path "$p")
 done <<< "$projects"
 if [ "${#paths[@]}" -eq 0 ]; then
     forget
-    say "no memory on either machine; nothing to sync"
+    say "no memory and no conversation on either machine; nothing to sync"
     exit 0
 fi
-say "projects with memory: $((${#paths[@]} / 2))"
+say "projects to sync: $((${#paths[@]} / 2))"
 
 # 6. The sync.
 rc=0
@@ -229,10 +243,46 @@ printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | hide_addresses 
 # The line reads "  skipped: <path> (<reason>)" (measured on 2.54.0, 2026-10-05).
 listed() { printf '%s\n' "$out" | tr '\r' '\n' | sed -n "s/^  $1: \(.*\) ([^()]*)\$/\1/p" | LC_ALL=C sort -u; }
 short()  { sed "s/^$TRIM//" | paste -sd ',' | sed 's/,/, /g'; }
+# norm — unison's words with its carriage returns turned into line ends.
+norm() { printf '%s\n' "$out" | tr '\r' '\n'; }
+# still_written — the items a live session was still writing while unison copied them, one per
+# line, when that is ALL that went wrong this turn: nothing skipped, and either exit 1 with items
+# "partially transferred" or exit 2 where every "Failed [...]" says "has been modified during
+# synchronization" (both measured on 2.54.0, 2026-10-09; the summary lines carry no reason).
+# Prints nothing otherwise.
+still_written() {
+    local n_failed n_modified
+    [ -z "$(listed skipped)" ] || return 0
+    case "$rc" in
+        1) norm | sed -n 's/^  partially transferred: //p' | LC_ALL=C sort -u ;;
+        2)
+            n_failed="$(norm | grep -c '^Failed \[' || true)"
+            n_modified="$(norm | grep -c 'has been modified during synchronization' || true)"
+            if [ "$n_failed" -gt 0 ] && [ "$n_failed" = "$n_modified" ]; then
+                norm | sed -n 's/^  \(failed\|partially transferred\): //p' | LC_ALL=C sort -u
+            fi ;;
+    esac
+}
 last_words() { printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' ' '; }
 
+# A live session's conversation, still being written. Quiet until such turns have gone on unbroken
+# for PARTIAL_HOURS; a clean turn (exit 0) ends the run of them.
+partial="$(still_written)"
+if [ -n "$partial" ]; then
+    now="$(date +%s)"; since=""
+    if [ -r "$PARTIAL" ]; then read -r since < "$PARTIAL" || true; fi
+    case "$since" in ''|*[!0-9]*) since="$now"; mkdir -p "$STATE_DIR"; printf '%s\n' "$now" > "$PARTIAL" ;; esac
+    if [ $((now - since)) -lt $((PARTIAL_HOURS * 3600)) ]; then
+        say "still being written, left for the next turn (unison exit $rc): $(printf '%s\n' "$partial" | short)"
+        exit 0
+    fi
+    alert "partial" "Claude memory: a conversation still being written after $PARTIAL_HOURS hours" \
+        "Every turn since $(date -d "@$since" '+%a %H:%M') left it uncopied: $(printf '%s\n' "$partial" | short)"
+    exit 1
+fi
+
 case "$rc" in
-    0) forget; say "unison exit 0: memory is the same on both machines"; exit 0 ;;
+    0) forget; say "unison exit 0: memory and conversations are the same on both machines"; exit 0 ;;
     1)
         skipped="$(listed skipped)"
         if [ -z "$skipped" ]; then

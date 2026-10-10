@@ -19,7 +19,7 @@ Sandboxed Claude Code launcher.
 
 Options:
   -u, --update        Update Claude Code inside the container
-  -l, --login         Run claude login (OAuth via browser)
+  -l, --login         Run claude auth login (OAuth via browser)
   -e, --enter         Enter the container shell (no Claude Code)
   -f, --fleet         Open the session roster (FleetView) instead of a new session
       --global-config Start in the config repository, ~/containers/claude-home/.claude
@@ -69,7 +69,7 @@ update_claude() {
 }
 
 run_login() {
-    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude login'
+    distrobox enter -nw "$CONTAINER_NAME" -- bash -c 'export PATH="$HOME/.local/bin:$PATH"; claude auth login'
 }
 
 run_claude() {
